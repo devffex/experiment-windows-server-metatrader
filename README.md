@@ -1,8 +1,8 @@
 # Windows Server Multi-User Concurrent MetaTrader Architecture
 
-This repository serves as the complete architectural reference and step-by-step implementation guide for configuring a high-availability, multi-user, and multi-session Windows Server environment optimized for running concurrent instances of **MetaTrader 4 (MT4)** and **MetaTrader 5 (MT5)**.
+This repository serves as the complete architectural reference and step-by-step implementation guide for configuring a high-availability, multi-user, and multi-session Windows Server environment optimized for running concurrent instances of **MetaTrader 5 (MT5)**.
 
-This setup is ideal for prop firms, trading groups, and quantitative asset managers who require multiple isolated traders or automated trading systems (EAs) to run concurrently on a single robust server without interference, resource starvation, or security cross-contamination.
+This setup is ideal for prop firms, trading groups, and quantitative asset managers who require multiple isolated traders or automated trading systems (EAs) to run concurrently on a single robust server. The architecture guarantees absolute isolation, security, and automated execution without session overlaps, desktop collisions, or cross-contamination.
 
 ---
 
@@ -12,59 +12,57 @@ This repository provides comprehensive, production-grade documentation to set up
 
 The architecture guarantees a secure, isolated, and highly optimized environment for concurrent remote users, characterized by:
 
-*   **Concurrent Desktop Access:** Support for multiple concurrent user connections via Remote Desktop Protocol (RDP). Each user connects to their own isolated desktop environment simultaneously, ensuring zero conflicts, collisions, or session overlaps.
-*   **Automated User & App Provisioning:** Automated user management, permission boundary creation, and portable application installations to eliminate manual setup tasks and guarantee configuration consistency.
-*   **Granular Resource & Directory Isolation:** Each user operates within their own isolated context, mapping to secure `"Users"` directories. They have access to specific allocated resources and platforms while being strictly prevented from accessing other users' files, logs, or processes.
-*   **Production-Ready Tuning:** Complete reference guides for GPO adjustments, registry optimization, Network Interface Card (NIC) performance, anti-malware exclusions, and automatic autostart boot tasks to ensure uninterrupted 24/7 background operation.
+*   **Central Administration Orchestrator:** An external-facing admin service that listens to provisioning commands, programmatically spins up Windows users, builds sandbox directories, configures credentials, and compiles optimized connection profiles.
+*   **Seamless Application Isolation:** Restricts users via Custom Shell Overrides. When a trader connects over RDP, they see *only* their designated MetaTrader 5 interface in a seamless window or full screen. The Windows Server desktop, Explorer shell, and filesystem remain completely hidden and inaccessible.
+*   **Session-Isolated loopback APIs:** A FastAPI trading wrapper utilizing Python `MetaTrader5`, `pandas`, `numpy`, and `psutil` running *inside* each user session. This solves MT5's session-specific Inter-Process Communication (IPC) limitations by binding dedicated loopback ports per user.
+*   **API Gateway Router:** A secure reverse-proxy that exposes a single public entry point on the server to route trading commands safely to the appropriate local user session loopback port.
 
 ---
 
-## Architectural Overview
+## Architectural Layout
 
-Below is the conceptual architecture of the multi-user concurrent MetaTrader environment. It isolates each trader inside their own RDP session, leverages Windows Server Remote Desktop Session Host (RDSH), enforces strict NTFS-level isolation, and ensures high availability via automated startup scheduling.
+The diagram below maps the three-tier architecture showing the external admin provisioning API, the seamless RDP exposure, and the reverse-proxy loopback routing:
 
 ```mermaid
 graph TD
-    subgraph Windows Server OS [Windows Server 2019 / 2022 / 2025]
-        direction TB
-        
-        subgraph RDS [Remote Desktop Services Session Host]
-            direction LR
-            Sess1[Trader 1 Session]
-            Sess2[Trader 2 Session]
-            SessN[Trader N Session]
-        end
-
-        subgraph GPO [Group Policy & Registry Tuning]
-            SessionLimits[Keep-Alive & Session Time Limits]
-            FairShare[DFSS Fair Share Optimization]
-            PerfSetting[Background Services Priority]
-        end
-
-        subgraph Storage [NTFS File System Isolation]
-            subgraph BaseDir [C:\MetaTrader\instances\]
-                T1_MT4_1["/portable/ - Trader1_MT4_1<br>(Full Control: Trader1 Only)"]
-                T1_MT4_2["/portable/ - Trader1_MT4_2<br>(Full Control: Trader1 Only)"]
-                T2_MT4_1["/portable/ - Trader2_MT4_1<br>(Full Control: Trader2 Only)"]
-            end
-        end
-
-        subgraph AutoRun [Task Scheduler / NSSM]
-            TS1["Startup Task<br>(Credentials: Trader1)"] --> T1_MT4_1
-            TS2["Startup Task<br>(Credentials: Trader1)"] --> T1_MT4_2
-            TS3["Startup Task<br>(Credentials: Trader2)"] --> T2_MT4_1
-        end
-
-        subgraph Network [Network Optimization & Firewalls]
-            FW[Windows Defender Firewall<br>Port 3389 VPN/IP Whitelist]
-            NIC[Disable NIC Energy Saving<br>Optimized TCP Window]
-        end
+    subgraph External_Network [External Entity / Admin & Traders]
+        AdminApp((Admin App / Entity)) -->|1. POST /api/v1/traders/provision| Orchestrator
+        Trader1_App((External Algo Client)) -->|4. HTTP Order /positions| Orchestrator
+        Trader1_GUI((Trader RDP Client)) -->|5. Connect via savisor-john.rdp| RemoteApp_S1
     end
 
-    Traders((Traders / Admins)) -->|Secure RDP over VPN| RDS
-    RDS --> Storage
-    GPO -.-> RDS
-    Network --> RDS
+    subgraph Windows_Server [Windows Server 2022 Session Host]
+        Orchestrator[Central Orchestrator & Gateway<br>FastAPI / SYSTEM Service - Port 8000]
+
+        subgraph Session_S1 [User Session: savisor-john]
+            direction TB
+            RemoteApp_S1[MetaTrader 5 GUI<br>Custom Shell: start-session.bat]
+            API_S1[Local API Wrapper<br>FastAPI / Uvicorn - Port 8003]
+            
+            RemoteApp_S1 <--->|IPC / same user context| API_S1
+        end
+
+        subgraph Session_S2 [User Session: savisor-julio]
+            direction TB
+            RemoteApp_S2[MetaTrader 5 GUI<br>Custom Shell: start-session.bat]
+            API_S2[Local API Wrapper<br>FastAPI / Uvicorn - Port 8001]
+            
+            RemoteApp_S2 <--->|IPC / same user context| API_S2
+        end
+
+        subgraph Session_S3 [User Session: savisor-luis]
+            direction TB
+            RemoteApp_S3[MetaTrader 5 GUI<br>Custom Shell: start-session.bat]
+            API_S3[Local API Wrapper<br>FastAPI / Uvicorn - Port 8002]
+            
+            RemoteApp_S3 <--->|IPC / same user context| API_S3
+        end
+
+        Orchestrator -->|2. Provision local user, dir & custom shell| Session_S1
+        Orchestrator -.->|3. Reverse proxy trading requests to port 8003| API_S1
+        Orchestrator -.->|Route to port 8001| API_S2
+        Orchestrator -.->|Route to port 8002| API_S3
+    end
 ```
 
 ---
@@ -73,8 +71,10 @@ graph TD
 
 1. [Hardware & Sizing Guide](#1-hardware--sizing-guide)
 2. [Phase 0: AWS EC2 Windows Server Provisioning (Development)](#phase-0-aws-ec2-windows-server-provisioning-development)
-3. [Phase 2: Remote Connection & Elevated Command Access](#phase-2-remote-connection--elevated-command-access)
-4. [Phase 3: Scoped User Provisioning & Group Allocation](#phase-3-scoped-user-provisioning--group-allocation)
+3. [Phase 1: Central Orchestrator & API Gateway Setup](#phase-1-central-orchestrator--api-gateway-setup)
+4. [Phase 2: Custom Shell Override & RemoteApp Integration](#phase-2-custom-shell-override--remoteapp-integration)
+5. [Phase 3: Session-Isolated Loopback API Wrapper](#phase-3-session-isolated-loopback-api-wrapper)
+6. [Phase 4: Management & Verification Workflows](#phase-4-management--verification-workflows)
 
 ---
 
@@ -84,15 +84,13 @@ Before deploying the architecture, size the hardware based on the cumulative loa
 
 *   **Memory (RAM) Guidelines:**
     *   **Base OS Overhead:** 2.5 GB to 4 GB.
-    *   **MetaTrader 4 (MT4) Instance:** ~150 MB to 300 MB per terminal (varies based on chart count, history size, and EA complexity).
-    *   **MetaTrader 5 (MT5) Instance:** ~250 MB to 500 MB per terminal.
+    *   **MetaTrader 5 (MT5) Instance:** ~250 MB to 500 MB per terminal (varies based on chart count, history size, and EA complexity).
     *   *Formula:* `Required RAM = Base OS + (Number of Instances * Average Instance RAM) + Buffer (15%)`
 *   **Processor (CPU) Guidelines:**
-    *   Avoid using low-power CPU cores. High single-core speed is critical for fast order execution and EA processing.
+    *   Avoid low-power CPU cores. Single-thread processing speed is critical for fast order execution.
     *   Allocate **1 physical core (or 2 vCPUs)** for every **3 to 5 active MetaTrader terminals** running normal EAs.
-    *   Allocate **1 physical core** for every **1 to 2 active terminals** performing heavy optimization or high-frequency grid trading.
 *   **Storage (SSD/NVMe):**
-    *   **Mandatory:** Use Enterprise-grade NVMe SSDs in a RAID-1 or RAID-10 array. Standard HDDs or slow cloud block storage will bottleneck disk I/O when writing log files, tick histories, and indicators across multiple concurrent users.
+    *   **Mandatory:** Use Enterprise-grade NVMe SSDs. Fast, high-IOPS storage is critical for concurrent log writes, tick histories, and indicators across multiple concurrent users.
 
 ---
 
@@ -150,13 +148,20 @@ Run the following commands locally to prepare the security groups, SSH key pairs
     ```
 
 4.  **Lock Down Inbound Remote Desktop (RDP) Traffic:**
-    Authorize port 3389 (RDP) only from your specific management public IP address (e.g., `38.252.111.234/32`) to prevent public exposure:
+    Authorize port 3389 (RDP) and port 8000 (Central API) only from your specific management public IP address (e.g., `38.252.111.234/32`) to prevent public exposure:
     ```bash
     aws ec2 authorize-security-group-ingress \
         --profile julio \
         --group-id sg-0e8caf65de1b6c8c6 \
         --protocol tcp \
         --port 3389 \
+        --cidr 38.252.111.234/32
+
+    aws ec2 authorize-security-group-ingress \
+        --profile julio \
+        --group-id sg-0e8caf65de1b6c8c6 \
+        --protocol tcp \
+        --port 8000 \
         --cidr 38.252.111.234/32
     ```
 
@@ -200,99 +205,421 @@ Run the following commands locally to prepare the security groups, SSH key pairs
 
 ---
 
-## Phase 2: Remote Connection & Elevated Command Access
+## Phase 1: Central Orchestrator & API Gateway Setup
 
-Once the AWS EC2 instance is fully initialized and you have retrieved the Administrator password, you must establish a Remote Desktop connection and open an elevated Administrative Command Prompt (CMD) to configure the system.
+The **Central Orchestrator** is a Python FastAPI service running continuously under the Windows `SYSTEM` account (or an elevated administrator service). It listens on **port 8000** for instructions from the external administrative dashboard to:
+1. Dynamically provision new local Windows users.
+2. Initialize isolated MT5 directories and files.
+3. Configure the user's registry shell overrides.
+4. Route API requests from the external world directly to the trader's session-isolated FastAPI server via reverse-proxying.
 
-### Step 1: Connecting via Remote Desktop Protocol (RDP)
+### Step 1: Base Environment Setup
+On the Windows Server, create the base directories and install required dependencies. Open an elevated PowerShell prompt:
 
-1.  **Launch your RDP Client:**
-    *   *Windows:* Open **Remote Desktop Connection** (`mstsc`).
-    *   *macOS:* Use **Microsoft Remote Desktop** from the App Store.
-    *   *Linux:* Use **Remmina** or **xfreerdp**.
-2.  **Enter Connection Details:**
-    *   **Computer / Host IP:** `44.203.211.14` (your instance's public IP from Phase 0).
-    *   **Username:** `Administrator`
-3.  **Provide Credentials:**
-    *   Input the decrypted password retrieved from the `aws ec2 get-password-data` command in Phase 0.
-4.  **Accept Security Certificate:**
-    *   Acknowledge the self-signed certificate warning to establish the secure session.
+```powershell
+# Create root directory structures
+New-Item -ItemType Directory -Path "C:\MetaTrader\instances" -Force
+New-Item -ItemType Directory -Path "C:\MetaTrader\master" -Force
+New-Item -ItemType Directory -Path "C:\MetaTrader\orchestrator" -Force
 
-### Step 2: Launching Command Prompt (CMD) with Admin Privileges
+# Install system-wide Python dependencies using uv (or standard pip)
+python -m pip install fastapi uvicorn pydantic psutil pywin32 pandas numpy httpx python-multipart
+```
 
-Many setup operations require absolute system privileges. You must run all command shells in **Elevated Mode**:
+> [!TIP]
+> Always place a clean, fully configured portable MT5 terminal into `C:\MetaTrader\master\`. This will serve as our golden base image. Each new trader directory will copy this base folder, allowing rapid, clean provisioning.
 
-1.  Inside the Remote Desktop session, click the **Start Menu** or press `Win + S`.
-2.  Type `cmd` in the search bar.
-3.  Right-click **Command Prompt** and select **Run as administrator**.
-4.  If prompted by User Account Control (UAC), click **Yes**.
-5.  *Verification Check:* Run the following command in PowerShell to confirm your shell is elevated:
-    ```powershell
-    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-    # Output must be: True
-    ```
+### Step 2: The Central Orchestrator API (`orchestrator.py`)
+Save the following file in `C:\MetaTrader\orchestrator\orchestrator.py`. It provides endpoints for external admin apps and handles dynamic RDP configuration compilation and trading traffic reverse-proxying:
+
+```python
+# C:\MetaTrader\orchestrator\orchestrator.py
+import os
+import shutil
+import string
+import random
+import subprocess
+import httpx
+from fastapi import FastAPI, HTTPException, Request, Response
+from pydantic import BaseModel
+
+app = FastAPI(title="MetaTrader Central Orchestrator", version="1.0.0")
+
+# Port mappings: Map trader name to their loopback port
+PORT_MAPPING = {
+    "julio": 8001,
+    "luis": 8002,
+    "john": 8003
+}
+
+class ProvisionRequest(BaseModel):
+    organization: str
+    trader_name: str
+
+def generate_random_password(length=18):
+    chars = string.ascii_letters + string.digits + "!@#$"
+    return "".join(random.choice(chars) for _ in range(length))
+
+@app.post("/api/v1/traders/provision")
+async def provision_trader(payload: ProvisionRequest):
+    org = payload.organization.lower()
+    trader = payload.trader_name.lower()
+    username = f"{org}-{trader}"
+    
+    if trader not in PORT_MAPPING:
+        raise HTTPException(status_code=400, detail=f"Trader '{trader}' has no loopback port configured.")
+
+    port = PORT_MAPPING[trader]
+    user_dir = f"C:\\Users\\{username}"
+    instance_dir = f"C:\\MetaTrader\\instances\\{username}"
+    master_dir = "C:\\MetaTrader\\master"
+
+    # 1. Create Windows User via PowerShell
+    password = generate_random_password()
+    ps_cmd = f"""
+    $SecPassword = ConvertTo-SecureString "{password}" -AsPlainText -Force
+    $UserExist = Get-LocalUser -Name "{username}" -ErrorAction SilentlyContinue
+    if (-not $UserExist) {{
+        New-LocalUser -Name "{username}" -Password $SecPassword -Description "MT5 Trader {trader}" -PasswordNeverExpires -UserMayNotChangePassword | Out-Null
+        Add-LocalGroupMember -Group "Remote Desktop Users" -Member "{username}"
+        
+        $GroupExist = Get-LocalGroup -Name "{org}-traders" -ErrorAction SilentlyContinue
+        if (-not $GroupExist) {{
+            New-LocalGroup -Name "{org}-traders"
+        }}
+        Add-LocalGroupMember -Group "{org}-traders" -Member "{username}"
+    }}
+    """
+    subprocess.run(["powershell", "-Command", ps_cmd], check=True)
+
+    # 2. Copy Base Portable Terminal
+    if not os.path.exists(master_dir):
+        raise HTTPException(status_code=500, detail="Master terminal template does not exist.")
+    
+    if not os.path.exists(instance_dir):
+        os.makedirs(instance_dir, exist_ok=True)
+        shutil.copytree(master_dir, os.path.join(instance_dir, "terminal"), dirs_exist_ok=True)
+    
+    # 3. Mount Registry Hive & Apply Custom Shell Override
+    # This replaces explorer.exe for this user, hiding the desktop and forcing MT5 GUI to launch
+    reg_cmd = f"""
+    $userDir = "{user_dir}"
+    if (-not (Test-Path $userDir)) {{
+        New-Item -ItemType Directory -Path $userDir -Force | Out-Null
+        Copy-Item "C:\\Users\\Default\\NTUSER.DAT" "$userDir\\NTUSER.DAT" -Force
+    }}
+    # Load registry hive offline
+    reg load HKLM\\TempHive_{username} "$userDir\\NTUSER.DAT"
+    
+    # Write custom shell
+    $keyPath = "HKLM:\\TempHive_{username}\\Software\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon"
+    if (-not (Test-Path $keyPath)) {{
+        New-Item -Path $keyPath -Force | Out-Null
+    }}
+    Set-ItemProperty -Path $keyPath -Name "Shell" -Value "{instance_dir}\\start-session.bat" -Force
+    
+    # Unload registry hive
+    [gc]::Collect()
+    reg unload HKLM\\TempHive_{username}
+    """
+    subprocess.run(["powershell", "-Command", reg_cmd], check=True)
+
+    # 4. Generate startup scripts for the local user session
+    # start-session.bat starts the API wrapper in background, and launches MT5 in foreground.
+    # Closing MT5 will kill the session.
+    start_session_content = f"""@echo off
+cd /d "{instance_dir}"
+start "" /b pythonw "{instance_dir}\\api_session.py" --port {port}
+"{instance_dir}\\terminal\\terminal64.exe" /portable
+taskkill /F /IM pythonw.exe
+logoff
+"""
+    with open(f"{instance_dir}\\start-session.bat", "w") as f:
+        f.write(start_session_content)
+
+    # Copy the API wrapper code into the user's sandbox folder
+    shutil.copy("C:\\MetaTrader\\orchestrator\\api_session_template.py", f"{instance_dir}\\api_session.py")
+
+    # Grant user full control over their directory sandbox
+    acl_cmd = f'icacls "{instance_dir}" /grant "{username}:(OI)(CI)F" /T'
+    subprocess.run(acl_cmd, shell=True, check=True)
+
+    # 5. Generate client RDP connection file
+    # Uses RDP remoteapplicationmode (RemoteApp) to expose ONLY the window
+    rdp_content = f"""full address:s:localhost
+username:s:{username}
+screen mode id:i:2
+use multimon:i:0
+session bpp:i:32
+remoteapplicationmode:i:1
+remoteapplicationprogram:s:{instance_dir}\\start-session.bat
+remoteapplicationname:s:MetaTrader 5 - {trader.capitalize()}
+"""
+    rdp_path = f"{instance_dir}\\{username}.rdp"
+    with open(rdp_path, "w") as f:
+        f.write(rdp_content)
+
+    return {
+        "status": "success",
+        "message": f"Trader {username} provisioned successfully.",
+        "port": port,
+        "password": password,
+        "rdp_profile": rdp_path
+    }
+
+# 6. Gateway API Route: Reverse Proxies calls to the trader's session-isolated loopback API
+@app.api_route("/api/v1/traders/{trader_name}/api/{path:path}", methods=["GET", "POST", "DELETE", "PUT"])
+async def route_trader_request(trader_name: str, path: str, request: Request):
+    trader = trader_name.lower()
+    if trader not in PORT_MAPPING:
+        raise HTTPException(status_code=404, detail="Trader not registered.")
+    
+    port = PORT_MAPPING[trader]
+    url = f"http://127.0.0.1:{port}/{path}"
+    
+    async with httpx.AsyncClient() as client:
+        body = await request.body()
+        params = dict(request.query_params)
+        headers = dict(request.headers)
+        headers.pop("host", None) # Let httpx reconstruct Host
+        
+        try:
+            res = await client.request(
+                method=request.method,
+                url=url,
+                headers=headers,
+                params=params,
+                content=body,
+                timeout=30.0
+            )
+            return Response(content=res.content, status_code=res.status_code, headers=dict(res.headers))
+        except httpx.ConnectError:
+            raise HTTPException(status_code=503, detail=f"Trader session '{trader}' API wrapper is offline. Ensure the user RDP session is active.")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+```
 
 ---
 
-## Phase 3: Scoped User Provisioning & Group Allocation
+## Phase 2: Custom Shell Override & RemoteApp Integration
 
-To prevent session collision and secure user environments, we provision dedicated, standard (non-administrative) accounts for each trader. We follow an organization-scoped naming convention: `[organization]-[traderName]` (e.g., `savisor-julio` and `savisor-luis` for the `savisor` organization).
+Exposing the server's full remote desktop allows users to access file systems, launch arbitrary processes, and compromise server integrity. Our architecture uses **Custom User-Level Shell Overrides** to restrict access entirely.
 
-### Step 1: Automating Scoped User Creation via PowerShell
+### Custom Session Lifecycle Control
+Instead of running `explorer.exe` (which loads the desktop, taskbar, and file browser) as the user shell, Windows mounts our `start-session.bat` script during the initial RDP handshakes:
 
-Instead of creating accounts manually, use the following PowerShell script inside your elevated Command Prompt / PowerShell window. This script automates user creation, assigns secure random passwords, enforces unattended-operation flags, and configures group memberships.
+1. **Active Hooking:** The user initiates an RDP login.
+2. **Registry Execution:** Windows checks `HKCU\Software\Microsoft\Windows NT\CurrentVersion\Winlogon\Shell`. Finding a script path, it bypasses the explorer shell.
+3. **Loopback API Activation:** The script executes a background, non-interactive python process containing the session-isolated API wrapper (`api_session.py`).
+4. **Foreground Program Launch:** The script launches MetaTrader 5 inside the foreground `/portable` session.
+5. **Lock-in Guard:** The user interacts with the MT5 GUI directly. Minimized windows yield a blank background (no desktop icons or file manager are rendered).
+6. **Graceful Tear Down:** When the trader closes the MT5 window, the script catches the execution return, forcefully terminates the background Python service, and executes `logoff`, tearing down the RDP user session.
 
-```powershell
-# 1. Define Organization and Trader variables
-$OrgName = "savisor"
-$Traders = @("julio", "luis")
+```mermaid
+sequenceDiagram
+    participant Client as Trader RDP Client
+    participant OS as Server Winlogon
+    participant Script as start-session.bat
+    participant API as Local FastAPI (Port 800X)
+    participant MT5 as MT5 Terminal (Portable)
 
-# 2. Create a dedicated organization security group
-$GroupExist = Get-LocalGroup -Name "$OrgName-traders" -ErrorAction SilentlyContinue
-if (-not $GroupExist) {
-    New-LocalGroup -Name "$OrgName-traders" -Description "Dedicated group for $OrgName traders"
-}
-
-# 3. Provision each trader account
-foreach ($Trader in $Traders) {
-    $Username = "$OrgName-$Trader"
-    
-    # Check if user already exists
-    $UserExist = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
-    if ($UserExist) {
-        Write-Host "User $Username already exists, skipping creation." -ForegroundColor Yellow
-        continue
-    }
-
-    # Generate a secure password (minimum 18 characters)
-    $PasswordCharSet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%"
-    $SecurePasswordString = -join ((1..18) | ForEach-Object { $PasswordCharSet[(Get-Random -Maximum $PasswordCharSet.Length)] })
-    $SecurePassword = ConvertTo-SecureString $SecurePasswordString -AsPlainText -Force
-
-    # Create the user account
-    # Note: PasswordNeverExpires prevents account lockouts during active background processes
-    $NewUser = New-LocalUser -Name $Username -Password $SecurePassword -Description "Trader account for $Trader ($OrgName)" -PasswordNeverExpires -UserMayNotChangePassword
-    
-    # Add user to the organization group
-    Add-LocalGroupMember -Group "$OrgName-traders" -Member $Username
-    
-    # Allow concurrent RDP access by adding them to the built-in Remote Desktop Users group
-    Add-LocalGroupMember -Group "Remote Desktop Users" -Member $Username
-
-    Write-Host "Created user: $Username" -ForegroundColor Green
-    Write-Host "Generated Password for $Username: $SecurePasswordString" -ForegroundColor Cyan
-    Write-Host "----------------------------------------"
-}
+    Client->>OS: Initiate login (savisor-john)
+    OS->>OS: Load NTUSER.DAT (Shell Override key found)
+    OS->>Script: Run Shell Override Script
+    Script->>API: Launch in background (pythonw api_session.py)
+    Script->>MT5: Launch in foreground (terminal64.exe /portable)
+    MT5->>Client: Display MT5 window in client interface
+    Note over Client, MT5: Trader interacts ONLY with MT5 GUI
+    Client->>MT5: Close MT5 Terminal
+    MT5-->>Script: Process exit (return code 0)
+    Script->>API: Terminate API Wrapper (taskkill)
+    Script->>OS: Execute logoff
+    OS-->>Client: RDP Session Terminated
 ```
 
-### Step 2: Verification of Provisioned Users
+---
 
-To verify that the users were created and placed into the correct security groups, run:
+## Phase 3: Session-Isolated Loopback API Wrapper
 
-```powershell
-# List all members of the Remote Desktop Users group
-Get-LocalGroupMember -Group "Remote Desktop Users"
+The official MetaTrader 5 Python integration communicates using Windows session handles. If Python runs under a different user profile, it cannot interact with another session's MT5 window.
 
-# List all members of the organization-specific group
-Get-LocalGroupMember -Group "savisor-traders"
+### Step 1: Session-Isolated API Design (`api_session_template.py`)
+To bypass this limitation, we place a custom Python API template inside `C:\MetaTrader\orchestrator\api_session_template.py`. When a new trader is provisioned, this template is copied directly to their sandbox directory and initialized:
+
+```python
+# C:\MetaTrader\orchestrator\api_session_template.py
+import argparse
+import sys
+import psutil
+import pandas as pd
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import MetaTrader5 as mt5
+
+app = FastAPI(title="Session MT5 Loopback API")
+
+class LoginRequest(BaseModel):
+    login: int
+    password: str
+    server: str
+
+class OrderRequest(BaseModel):
+    symbol: str
+    volume: float
+    action: str  # BUY / SELL
+    price: float = None
+    sl: float = None
+    tp: float = None
+
+@app.post("/login")
+def login_broker(payload: LoginRequest):
+    # Initialize connection to terminal locally
+    if not mt5.initialize():
+        raise HTTPException(status_code=500, detail=f"MT5 initialization failed: {mt5.last_error()}")
+    
+    # Perform login
+    authorized = mt5.login(
+        login=payload.login,
+        password=payload.password,
+        server=payload.server
+    )
+    if not authorized:
+        raise HTTPException(status_code=401, detail=f"Broker login failed: {mt5.last_error()}")
+    
+    return {"status": "success", "message": f"Successfully logged into account {payload.login}"}
+
+@app.get("/account")
+def get_account_info():
+    info = mt5.account_info()
+    if info is None:
+        raise HTTPException(status_code=500, detail=f"Failed to fetch account info: {mt5.last_error()}")
+    return info._asdict()
+
+@app.post("/order")
+def send_order(payload: OrderRequest):
+    # Map actions
+    action_type = mt5.ORDER_TYPE_BUY if payload.action.upper() == "BUY" else mt5.ORDER_TYPE_SELL
+    
+    # Resolve Price if not provided
+    price = payload.price
+    if not price:
+        tick = mt5.symbol_info_tick(payload.symbol)
+        if not tick:
+            raise HTTPException(status_code=400, detail=f"Failed to fetch symbol ask/bid: {mt5.last_error()}")
+        price = tick.ask if payload.action.upper() == "BUY" else tick.bid
+
+    request = {
+        "action": mt5.TRADE_ACTION_DEAL,
+        "symbol": payload.symbol,
+        "volume": payload.volume,
+        "type": action_type,
+        "price": price,
+        "sl": payload.sl or 0.0,
+        "tp": payload.tp or 0.0,
+        "deviation": 20,
+        "magic": 123456,
+        "comment": "FastAPI Auto-order",
+        "type_time": mt5.ORDER_TIME_GTC,
+        "type_filling": mt5.ORDER_FILLING_FOK,
+    }
+
+    result = mt5.order_send(request)
+    if result.retcode != mt5.TRADE_RETCODE_DONE:
+        raise HTTPException(status_code=400, detail=f"Order rejected: retcode={result.retcode}, comment={result.comment}")
+    
+    return result._asdict()
+
+@app.get("/positions")
+def get_positions(symbol: str = None):
+    # Retrieve active open positions
+    positions = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
+    if positions is None:
+        return {"positions": []}
+    
+    # Process array with Pandas to convert NumPy types safely into JSON
+    df = pd.DataFrame(list(positions), columns=positions[0]._asdict().keys() if len(positions) > 0 else [])
+    df = df.replace({np.nan: None})
+    return {"positions": df.to_dict(orient="records")}
+
+@app.get("/health")
+def get_health():
+    # Gather CPU and memory usage statistics
+    proc = psutil.Process()
+    return {
+        "status": "healthy",
+        "pid": proc.pid,
+        "cpu_percent": proc.cpu_percent(),
+        "memory_info": proc.memory_info()._asdict()
+    }
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=8001)
+    args = parser.parse_args()
+    
+    import uvicorn
+    uvicorn.run(app, host="127.0.0.1", port=args.port)
+```
+
+---
+
+## Phase 4: Management & Verification Workflows
+
+Use the steps below to verify your dynamic, three-trader environment provisioning (`savisor-julio`, `savisor-luis`, `savisor-john`) and confirm active reverse-proxy routing:
+
+### Step 1: Launch the Central Orchestrator
+Start the orchestrator locally inside an elevated command window:
+```cmd
+python C:\MetaTrader\orchestrator\orchestrator.py
+```
+
+### Step 2: Trigger Provisioning calls
+From your administration program (or curl command client), run the provisioner for all three accounts:
+
+```bash
+# Provision savisor-julio
+curl -X POST http://localhost:8000/api/v1/traders/provision \
+  -H "Content-Type: application/json" \
+  -d '{"organization": "savisor", "trader_name": "julio"}'
+
+# Provision savisor-luis
+curl -X POST http://localhost:8000/api/v1/traders/provision \
+  -H "Content-Type: application/json" \
+  -d '{"organization": "savisor", "trader_name": "luis"}'
+
+# Provision savisor-john
+curl -X POST http://localhost:8000/api/v1/traders/provision \
+  -H "Content-Type: application/json" \
+  -d '{"organization": "savisor", "trader_name": "john"}'
+```
+
+### Step 3: Connect to the Isolated RDP Shell
+Download the compiled `savisor-john.rdp` file generated in `C:\MetaTrader\instances\savisor-john\savisor-john.rdp` and launch it:
+1. Provide the credentials (generated password returned in the provision JSON response).
+2. The RDP session opens and launches *only* the MetaTrader 5 GUI inside the screen space.
+3. Observe that there is no Windows Server desktop, Explorer shell, or Start menu accessible.
+4. Try closing the MT5 application window. Note that the RDP session immediately disconnects and signs off.
+
+### Step 4: Programmatically Interact Externally
+While John's terminal is active under his RDP session, your external application can trade and query metrics directly via our reverse-proxy gateway on port 8000. Each request is securely directed internally to port 8003:
+
+```bash
+# Get health and CPU metrics for John's session API
+curl http://localhost:8000/api/v1/traders/john/api/health
+
+# Perform login for John's terminal to his broker account
+curl -X POST http://localhost:8000/api/v1/traders/john/api/login \
+  -H "Content-Type: application/json" \
+  -d '{"login": 5012345, "password": "BrokerPassword", "server": "MetaQuotes-Demo"}'
+
+# Send an automated market buy order to John's terminal
+curl -X POST http://localhost:8000/api/v1/traders/john/api/order \
+  -H "Content-Type: application/json" \
+  -d '{"symbol": "EURUSD", "volume": 0.1, "action": "BUY"}'
+
+# Retrieve active open positions
+curl http://localhost:8000/api/v1/traders/john/api/positions
 ```
