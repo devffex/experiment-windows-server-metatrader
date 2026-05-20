@@ -72,14 +72,15 @@ graph TD
 ## Table of Contents
 
 1. [Hardware & Sizing Guide](#1-hardware--sizing-guide)
-2. [Phase 1: Base Operating System Preparation](#phase-1-base-operating-system-preparation)
-3. [Phase 2: Active Directory vs. Local Accounts & User Provisioning](#phase-2-active-directory-vs-local-accounts--user-provisioning)
-4. [Phase 3: Remote Desktop Services (RDS) & Session Configuration](#phase-3-remote-desktop-services-rds--session-configuration)
-5. [Phase 4: Windows GPO & Registry Performance Tuning](#phase-4-windows-gpo-and-registry-performance-tuning)
-6. [Phase 5: Isolated Folder Structure & Portable MetaTrader Setup](#phase-5-isolated-folder-structure--portable-metatrader-setup)
-7. [Phase 6: Automating Autostart & Unattended Operation](#phase-6-automating-autostart--unattended-operation)
-8. [Phase 7: Network Optimization & Firewall Configuration](#phase-7-network-optimization--firewall-configuration)
-9. [Phase 8: Monitoring, Maintenance, & Weekend Maintenance Scripts](#phase-8-monitoring-maintenance--weekend-maintenance-scripts)
+2. [Phase 0: AWS EC2 Windows Server Provisioning (Development)](#phase-0-aws-ec2-windows-server-provisioning-development)
+3. [Phase 1: Base Operating System Preparation](#phase-1-base-operating-system-preparation)
+4. [Phase 2: Active Directory vs. Local Accounts & User Provisioning](#phase-2-active-directory-vs-local-accounts--user-provisioning)
+5. [Phase 3: Remote Desktop Services (RDS) & Session Configuration](#phase-3-remote-desktop-services-rds--session-configuration)
+6. [Phase 4: Windows GPO & Registry Performance Tuning](#phase-4-windows-gpo-and-registry-performance-tuning)
+7. [Phase 5: Isolated Folder Structure & Portable MetaTrader Setup](#phase-5-isolated-folder-structure--portable-metatrader-setup)
+8. [Phase 6: Automating Autostart & Unattended Operation](#phase-6-automating-autostart--unattended-operation)
+9. [Phase 7: Network Optimization & Firewall Configuration](#phase-7-network-optimization--firewall-configuration)
+10. [Phase 8: Monitoring, Maintenance, & Weekend Maintenance Scripts](#phase-8-monitoring-maintenance--weekend-maintenance-scripts)
 
 ---
 
@@ -98,6 +99,112 @@ Before deploying the architecture, size the hardware based on the cumulative loa
     *   Allocate **1 physical core** for every **1 to 2 active terminals** performing heavy optimization or high-frequency grid trading.
 *   **Storage (SSD/NVMe):**
     *   **Mandatory:** Use Enterprise-grade NVMe SSDs in a RAID-1 or RAID-10 array. Standard HDDs or slow cloud block storage will bottleneck disk I/O when writing log files, tick histories, and indicators across multiple concurrent users.
+
+---
+
+## Phase 0: AWS EC2 Windows Server Provisioning (Development)
+
+For development and testing environments supporting a maximum of **5 concurrent MetaTrader terminals**, a small, cost-effective EC2 instance is highly recommended to minimize operational costs while satisfying all architectural requirements.
+
+### Development Sizing Configuration
+*   **Instance Type:** `t3.medium` (2 vCPUs, 4 GB RAM). This is sufficient for development purposes running up to 5 lightweight MetaTrader terminals under lean OS configurations.
+*   **Storage:** 40 GB `gp3` SSD (EBS volume). Fast, high-IOPS storage is critical for concurrent log writes.
+*   **Operating System:** Windows Server 2022 English Full Base (`ami-0909cee4864578472`).
+
+Below is the automated step-by-step deployment using the AWS CLI under the `--profile julio` profile.
+
+### Step 1: Provisioning the AWS Environment via AWS CLI
+
+Run the following commands locally to prepare the security groups, SSH key pairs, and launch the development instance:
+
+1.  **Retrieve the Latest Windows Server 2022 AMI:**
+    Identify the latest Windows Server 2022 English Full Base AMI in your region (default: `us-east-1`):
+    ```bash
+    aws ec2 describe-images \
+        --profile julio \
+        --owners amazon \
+        --filters "Name=name,Values=Windows_Server-2022-English-Full-Base-*" "Name=state,Values=available" \
+        --query "sort_by(Images, &CreationDate)[-1].ImageId" \
+        --output text
+    # Output: ami-0909cee4864578472
+    ```
+
+2.  **Create a Dedicated Key Pair:**
+    Generate an EC2 Key Pair named `mt-dev-key` and securely download the private `.pem` key:
+    ```bash
+    aws ec2 create-key-pair \
+        --profile julio \
+        --key-name mt-dev-key \
+        --query "KeyMaterial" \
+        --output text > mt-dev-key.pem
+
+    # Restrict permissions on the private key file
+    chmod 400 mt-dev-key.pem
+    ```
+
+3.  **Create a Secure Security Group:**
+    Create a new security group named `mt-dev-sg` within your default VPC (e.g., `vpc-0bc96c10cb1e9608c`):
+    ```bash
+    aws ec2 create-security-group \
+        --profile julio \
+        --group-name mt-dev-sg \
+        --description "Security group for MetaTrader Dev Server" \
+        --vpc-id vpc-0bc96c10cb1e9608c \
+        --query "GroupId" \
+        --output text
+    # Output: sg-0e8caf65de1b6c8c6
+    ```
+
+4.  **Lock Down Inbound Remote Desktop (RDP) Traffic:**
+    Authorize port 3389 (RDP) only from your specific management public IP address (e.g., `38.252.111.234/32`) to prevent public exposure:
+    ```bash
+    aws ec2 authorize-security-group-ingress \
+        --profile julio \
+        --group-id sg-0e8caf65de1b6c8c6 \
+        --protocol tcp \
+        --port 3389 \
+        --cidr 38.252.111.234/32
+    ```
+
+5.  **Launch the EC2 Development Instance:**
+    Spin up the `t3.medium` instance using the parameters established above:
+    ```bash
+    aws ec2 run-instances \
+        --profile julio \
+        --image-id ami-0909cee4864578472 \
+        --count 1 \
+        --instance-type t3.medium \
+        --key-name mt-dev-key \
+        --security-group-ids sg-0e8caf65de1b6c8c6 \
+        --associate-public-ip-address \
+        --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":40,"VolumeType":"gp3"}}]' \
+        --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=MT-SRV-DEV-01}]' \
+        --query "Instances[0].InstanceId" \
+        --output text
+    # Output: i-0abcf66cf0d99f8c1
+    ```
+
+6.  **Retrieve Instance Public IP:**
+    Query the public IP address of the newly provisioned development instance:
+    ```bash
+    aws ec2 describe-instances \
+        --profile julio \
+        --instance-ids i-0abcf66cf0d99f8c1 \
+        --query "Reservations[0].Instances[0].PublicIpAddress" \
+        --output text
+    # Output: 44.203.211.14
+    ```
+
+7.  **Decrypt the Windows Administrator Password:**
+    After waiting 3-4 minutes for Windows to initialize, decrypt the password using your local private key:
+    ```bash
+    aws ec2 get-password-data \
+        --profile julio \
+        --instance-id i-0abcf66cf0d99f8c1 \
+        --priv-launch-key mt-dev-key.pem
+    ```
+
+Once you have RDP connection access and your administrative credentials, proceed to **Phase 1: Base Operating System Preparation** below.
 
 ---
 
