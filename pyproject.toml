@@ -1,0 +1,9 @@
+[project]
+name = "metatrader-monorepo"
+version = "0.1.0"
+description = "Multi-User Isolated MetaTrader 5 Workspace boilerplate"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.uv.workspace]
+members = ["apps/*", "packages/*"]
