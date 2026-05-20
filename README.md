@@ -73,6 +73,8 @@ graph TD
 
 1. [Hardware & Sizing Guide](#1-hardware--sizing-guide)
 2. [Phase 0: AWS EC2 Windows Server Provisioning (Development)](#phase-0-aws-ec2-windows-server-provisioning-development)
+3. [Phase 2: Remote Connection & Elevated Command Access](#phase-2-remote-connection--elevated-command-access)
+4. [Phase 3: Scoped User Provisioning & Group Allocation](#phase-3-scoped-user-provisioning--group-allocation)
 
 ---
 
@@ -195,3 +197,102 @@ Run the following commands locally to prepare the security groups, SSH key pairs
         --instance-id i-0abcf66cf0d99f8c1 \
         --priv-launch-key mt-dev-key.pem
     ```
+
+---
+
+## Phase 2: Remote Connection & Elevated Command Access
+
+Once the AWS EC2 instance is fully initialized and you have retrieved the Administrator password, you must establish a Remote Desktop connection and open an elevated Administrative Command Prompt (CMD) to configure the system.
+
+### Step 1: Connecting via Remote Desktop Protocol (RDP)
+
+1.  **Launch your RDP Client:**
+    *   *Windows:* Open **Remote Desktop Connection** (`mstsc`).
+    *   *macOS:* Use **Microsoft Remote Desktop** from the App Store.
+    *   *Linux:* Use **Remmina** or **xfreerdp**.
+2.  **Enter Connection Details:**
+    *   **Computer / Host IP:** `44.203.211.14` (your instance's public IP from Phase 0).
+    *   **Username:** `Administrator`
+3.  **Provide Credentials:**
+    *   Input the decrypted password retrieved from the `aws ec2 get-password-data` command in Phase 0.
+4.  **Accept Security Certificate:**
+    *   Acknowledge the self-signed certificate warning to establish the secure session.
+
+### Step 2: Launching Command Prompt (CMD) with Admin Privileges
+
+Many setup operations require absolute system privileges. You must run all command shells in **Elevated Mode**:
+
+1.  Inside the Remote Desktop session, click the **Start Menu** or press `Win + S`.
+2.  Type `cmd` in the search bar.
+3.  Right-click **Command Prompt** and select **Run as administrator**.
+4.  If prompted by User Account Control (UAC), click **Yes**.
+5.  *Verification Check:* Run the following command in PowerShell to confirm your shell is elevated:
+    ```powershell
+    ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    # Output must be: True
+    ```
+
+---
+
+## Phase 3: Scoped User Provisioning & Group Allocation
+
+To prevent session collision and secure user environments, we provision dedicated, standard (non-administrative) accounts for each trader. We follow an organization-scoped naming convention: `[organization]-[traderName]` (e.g., `savisor-julio` and `savisor-luis` for the `savisor` organization).
+
+### Step 1: Automating Scoped User Creation via PowerShell
+
+Instead of creating accounts manually, use the following PowerShell script inside your elevated Command Prompt / PowerShell window. This script automates user creation, assigns secure random passwords, enforces unattended-operation flags, and configures group memberships.
+
+```powershell
+# 1. Define Organization and Trader variables
+$OrgName = "savisor"
+$Traders = @("julio", "luis")
+
+# 2. Create a dedicated organization security group
+$GroupExist = Get-LocalGroup -Name "$OrgName-traders" -ErrorAction SilentlyContinue
+if (-not $GroupExist) {
+    New-LocalGroup -Name "$OrgName-traders" -Description "Dedicated group for $OrgName traders"
+}
+
+# 3. Provision each trader account
+foreach ($Trader in $Traders) {
+    $Username = "$OrgName-$Trader"
+    
+    # Check if user already exists
+    $UserExist = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
+    if ($UserExist) {
+        Write-Host "User $Username already exists, skipping creation." -ForegroundColor Yellow
+        continue
+    }
+
+    # Generate a secure password (minimum 18 characters)
+    $PasswordCharSet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%"
+    $SecurePasswordString = -join ((1..18) | ForEach-Object { $PasswordCharSet[(Get-Random -Maximum $PasswordCharSet.Length)] })
+    $SecurePassword = ConvertTo-SecureString $SecurePasswordString -AsPlainText -Force
+
+    # Create the user account
+    # Note: PasswordNeverExpires prevents account lockouts during active background processes
+    $NewUser = New-LocalUser -Name $Username -Password $SecurePassword -Description "Trader account for $Trader ($OrgName)" -PasswordNeverExpires -UserMayNotChangePassword
+    
+    # Add user to the organization group
+    Add-LocalGroupMember -Group "$OrgName-traders" -Member $Username
+    
+    # Allow concurrent RDP access by adding them to the built-in Remote Desktop Users group
+    Add-LocalGroupMember -Group "Remote Desktop Users" -Member $Username
+
+    Write-Host "Created user: $Username" -ForegroundColor Green
+    Write-Host "Generated Password for $Username: $SecurePasswordString" -ForegroundColor Cyan
+    Write-Host "----------------------------------------"
+}
+```
+
+### Step 2: Verification of Provisioned Users
+
+To verify that the users were created and placed into the correct security groups, run:
+
+```powershell
+# List all members of the Remote Desktop Users group
+Get-LocalGroupMember -Group "Remote Desktop Users"
+
+# List all members of the organization-specific group
+Get-LocalGroupMember -Group "savisor-traders"
+```
