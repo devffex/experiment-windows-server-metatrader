@@ -72,15 +72,13 @@ graph TD
 ## Table of Contents
 
 1. [Hardware & Sizing Guide](#1-hardware--sizing-guide)
-2. [Phase 0: AWS EC2 Windows Server Provisioning (Development)](#phase-0-aws-ec2-windows-server-provisioning-development)
-3. [Phase 1: Base Operating System Preparation](#phase-1-base-operating-system-preparation)
-4. [Phase 2: Active Directory vs. Local Accounts & User Provisioning](#phase-2-active-directory-vs-local-accounts--user-provisioning)
-5. [Phase 3: Remote Desktop Services (RDS) & Session Configuration](#phase-3-remote-desktop-services-rds--session-configuration)
-6. [Phase 4: Windows GPO & Registry Performance Tuning](#phase-4-windows-gpo-and-registry-performance-tuning)
-7. [Phase 5: Isolated Folder Structure & Portable MetaTrader Setup](#phase-5-isolated-folder-structure--portable-metatrader-setup)
-8. [Phase 6: Automating Autostart & Unattended Operation](#phase-6-automating-autostart--unattended-operation)
-9. [Phase 7: Network Optimization & Firewall Configuration](#phase-7-network-optimization--firewall-configuration)
-10. [Phase 8: Monitoring, Maintenance, & Weekend Maintenance Scripts](#phase-8-monitoring-maintenance--weekend-maintenance-scripts)
+2. [Phase 1: Active Directory vs. Local Accounts & User Provisioning](#phase-1-active-directory-vs-local-accounts--user-provisioning)
+3. [Phase 2: Remote Desktop Services (RDS) & Session Configuration](#phase-2-remote-desktop-services-rds--session-configuration)
+4. [Phase 3: Windows GPO & Registry Performance Tuning](#phase-3-windows-gpo-and-registry-performance-tuning)
+5. [Phase 4: Isolated Folder Structure & Portable MetaTrader Setup](#phase-4-isolated-folder-structure--portable-metatrader-setup)
+6. [Phase 5: Automating Autostart & Unattended Operation](#phase-5-automating-autostart--unattended-operation)
+7. [Phase 6: Network Optimization & Firewall Configuration](#phase-6-network-optimization--firewall-configuration)
+8. [Phase 7: Monitoring, Maintenance, & Weekend Maintenance Scripts](#phase-7-monitoring-maintenance--weekend-maintenance-scripts)
 
 ---
 
@@ -102,130 +100,7 @@ Before deploying the architecture, size the hardware based on the cumulative loa
 
 ---
 
-## Phase 0: AWS EC2 Windows Server Provisioning (Development)
-
-For development and testing environments supporting a maximum of **5 concurrent MetaTrader terminals**, a small, cost-effective EC2 instance is highly recommended to minimize operational costs while satisfying all architectural requirements.
-
-### Development Sizing Configuration
-*   **Instance Type:** `t3.medium` (2 vCPUs, 4 GB RAM). This is sufficient for development purposes running up to 5 lightweight MetaTrader terminals under lean OS configurations.
-*   **Storage:** 40 GB `gp3` SSD (EBS volume). Fast, high-IOPS storage is critical for concurrent log writes.
-*   **Operating System:** Windows Server 2022 English Full Base (`ami-0909cee4864578472`).
-
-Below is the automated step-by-step deployment using the AWS CLI under the `--profile julio` profile.
-
-### Step 1: Provisioning the AWS Environment via AWS CLI
-
-Run the following commands locally to prepare the security groups, SSH key pairs, and launch the development instance:
-
-1.  **Retrieve the Latest Windows Server 2022 AMI:**
-    Identify the latest Windows Server 2022 English Full Base AMI in your region (default: `us-east-1`):
-    ```bash
-    aws ec2 describe-images \
-        --profile julio \
-        --owners amazon \
-        --filters "Name=name,Values=Windows_Server-2022-English-Full-Base-*" "Name=state,Values=available" \
-        --query "sort_by(Images, &CreationDate)[-1].ImageId" \
-        --output text
-    # Output: ami-0909cee4864578472
-    ```
-
-2.  **Create a Dedicated Key Pair:**
-    Generate an EC2 Key Pair named `mt-dev-key` and securely download the private `.pem` key:
-    ```bash
-    aws ec2 create-key-pair \
-        --profile julio \
-        --key-name mt-dev-key \
-        --query "KeyMaterial" \
-        --output text > mt-dev-key.pem
-
-    # Restrict permissions on the private key file
-    chmod 400 mt-dev-key.pem
-    ```
-
-3.  **Create a Secure Security Group:**
-    Create a new security group named `mt-dev-sg` within your default VPC (e.g., `vpc-0bc96c10cb1e9608c`):
-    ```bash
-    aws ec2 create-security-group \
-        --profile julio \
-        --group-name mt-dev-sg \
-        --description "Security group for MetaTrader Dev Server" \
-        --vpc-id vpc-0bc96c10cb1e9608c \
-        --query "GroupId" \
-        --output text
-    # Output: sg-0e8caf65de1b6c8c6
-    ```
-
-4.  **Lock Down Inbound Remote Desktop (RDP) Traffic:**
-    Authorize port 3389 (RDP) only from your specific management public IP address (e.g., `38.252.111.234/32`) to prevent public exposure:
-    ```bash
-    aws ec2 authorize-security-group-ingress \
-        --profile julio \
-        --group-id sg-0e8caf65de1b6c8c6 \
-        --protocol tcp \
-        --port 3389 \
-        --cidr 38.252.111.234/32
-    ```
-
-5.  **Launch the EC2 Development Instance:**
-    Spin up the `t3.medium` instance using the parameters established above:
-    ```bash
-    aws ec2 run-instances \
-        --profile julio \
-        --image-id ami-0909cee4864578472 \
-        --count 1 \
-        --instance-type t3.medium \
-        --key-name mt-dev-key \
-        --security-group-ids sg-0e8caf65de1b6c8c6 \
-        --associate-public-ip-address \
-        --block-device-mappings '[{"DeviceName":"/dev/sda1","Ebs":{"VolumeSize":40,"VolumeType":"gp3"}}]' \
-        --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=MT-SRV-DEV-01}]' \
-        --query "Instances[0].InstanceId" \
-        --output text
-    # Output: i-0abcf66cf0d99f8c1
-    ```
-
-6.  **Retrieve Instance Public IP:**
-    Query the public IP address of the newly provisioned development instance:
-    ```bash
-    aws ec2 describe-instances \
-        --profile julio \
-        --instance-ids i-0abcf66cf0d99f8c1 \
-        --query "Reservations[0].Instances[0].PublicIpAddress" \
-        --output text
-    # Output: 44.203.211.14
-    ```
-
-7.  **Decrypt the Windows Administrator Password:**
-    After waiting 3-4 minutes for Windows to initialize, decrypt the password using your local private key:
-    ```bash
-    aws ec2 get-password-data \
-        --profile julio \
-        --instance-id i-0abcf66cf0d99f8c1 \
-        --priv-launch-key mt-dev-key.pem
-    ```
-
-Once you have RDP connection access and your administrative credentials, proceed to **Phase 1: Base Operating System Preparation** below.
-
----
-
-## Phase 1: Base Operating System Preparation
-
-1.  **Clean Installation:** Install a fresh instance of **Windows Server 2022 Standard** or **Windows Server 2025 Standard** (Desktop Experience enabled).
-2.  **Rename & Domain Join:**
-    *   Set a clear, standardized hostname (e.g., `MT-SRV-PROD-01`).
-    *   If using an enterprise network, join the appropriate Active Directory domain. Otherwise, configure a strong local Workgroup.
-3.  **Network Settings (Static Configuration):**
-    *   Assign a static IPv4 address, Subnet Mask, Default Gateway, and DNS servers.
-    *   Recommended Public DNS for lowest latency and reliable resolution:
-        *   Primary: `1.1.1.1` (Cloudflare)
-        *   Secondary: `8.8.8.8` (Google)
-4.  **System Updates:**
-    *   Run Windows Update and apply all critical security updates.
-    *   *Crucial step:* Reboot before starting the RDS installation.
-
----
-
-## Phase 2: Active Directory vs. Local Accounts & User Provisioning
+## Phase 1: Active Directory vs. Local Accounts & User Provisioning
 
 Depending on scale, you can manage accounts locally (Workgroup) or centrally (Active Directory).
 
@@ -252,7 +127,7 @@ If utilizing Active Directory (AD DS):
 
 ---
 
-## Phase 3: Remote Desktop Services (RDS) & Session Configuration
+## Phase 2: Remote Desktop Services (RDS) & Session Configuration
 
 By default, Windows Server only allows **2 concurrent administrative RDP sessions**. To enable multiple concurrent non-admin trader sessions, you must install the **Remote Desktop Services** role.
 
@@ -286,7 +161,7 @@ After the reboot, you must configure a Licensing server and apply client access 
 
 ---
 
-## Phase 4: Windows GPO and Registry Performance Tuning
+## Phase 3: Windows GPO and Registry Performance Tuning
 
 Traders and EAs must remain online 24/7. Standard Windows Server GPOs will kill disconnected or idle sessions. This is unacceptable, as closing an RDP window would terminate all running MetaTrader terminals!
 
@@ -352,7 +227,7 @@ Set-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\TSFairShare\NetF
 
 ---
 
-## Phase 5: Isolated Folder Structure & Portable MetaTrader Setup
+## Phase 4: Isolated Folder Structure & Portable MetaTrader Setup
 
 To prevent traders from accessing, viewing, or editing other traders' indicators, bots, or log files, you must establish an isolated filesystem layout.
 
@@ -429,7 +304,7 @@ Write-Host "NTFS folder isolation applied successfully for $TraderUser!" -Foregr
 
 ---
 
-## Phase 6: Automating Autostart & Unattended Operation
+## Phase 5: Automating Autostart & Unattended Operation
 
 Windows Server will periodically reboot due to power cycling, virtualization hypervisor migrations, or automated security patches. If the server reboots, all MetaTrader terminals will go offline.
 **We must autostart all MetaTrader terminals in their respective user contexts without requiring traders to manually log in.**
@@ -481,7 +356,7 @@ Register-ScheduledTask -TaskName $TaskName -InputObject $Task -User $User -Passw
 
 ---
 
-## Phase 7: Network Optimization & Firewall Configuration
+## Phase 6: Network Optimization & Firewall Configuration
 
 Trading terminals are highly sensitive to network dropouts and latency spikes. Configure system networking to prioritize performance over power saving.
 
@@ -510,7 +385,7 @@ Set-NetFirewallRule -Name "RemoteDesktop-UserMode-In-TCP" -RemoteAddress "203.0.
 
 ---
 
-## Phase 8: Monitoring, Maintenance, & Weekend Maintenance Scripts
+## Phase 7: Monitoring, Maintenance, & Weekend Maintenance Scripts
 
 Continuous operation requires automated management, health checks, and scheduled maintenance periods.
 
