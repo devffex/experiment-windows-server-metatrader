@@ -1,4 +1,5 @@
 param (
+    [string]$EnvPath = "C:\savisor\.env",
     [string]$CloudflareToken = ""
 )
 
@@ -13,7 +14,7 @@ Write-Host "========================================================="
 Write-Host "Savisor MetaTrader Server Bootstrapper & Provisioner"
 Write-Host "========================================================="
 
-# 2. Establish directories
+# 2. Establish directories & load configuration
 $BaseDir = "C:\savisor"
 $TerminalDir = "$BaseDir\terminal"
 $ScriptsDir = "$BaseDir\scripts"
@@ -25,6 +26,52 @@ foreach ($dir in @($BaseDir, $TerminalDir, $ScriptsDir, $LogsDir, $TempDir)) {
     if (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
     }
+}
+
+# Helper to load .env file
+function Load-EnvFile {
+    param ([string]$Path)
+    if (Test-Path $Path) {
+        Write-Host "Loading environment variables from $Path..."
+        Get-Content $Path | ForEach-Object {
+            $line = $_.Trim()
+            if ($line -and -not $line.StartsWith("#") -and $line.Contains("=")) {
+                $index = $line.IndexOf("=")
+                $key = $line.Substring(0, $index).Trim()
+                $val = $line.Substring($index + 1).Trim()
+                # Remove wrapping quotes
+                if ($val.StartsWith('"') -and $val.EndsWith('"')) { $val = $val.Substring(1, $val.Length - 2) }
+                if ($val.StartsWith("'") -and $val.EndsWith("'")) { $val = $val.Substring(1, $val.Length - 2) }
+                [System.Environment]::SetEnvironmentVariable($key, $val, [System.EnvironmentVariableTarget]::Process)
+                [System.Environment]::SetEnvironmentVariable($key, $val, [System.EnvironmentVariableTarget]::Machine)
+            }
+        }
+    }
+}
+
+if (Test-Path $EnvPath) {
+    # Secure the file first
+    Write-Host "Securing environment file with strict NTFS ACLs..."
+    try {
+        $Acl = Get-Acl $EnvPath
+        $Acl.SetAccessRuleProtection($true, $false) # Remove inherited permissions
+        $SysRule = New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM", "FullControl", "Allow")
+        $AdminRule = New-Object System.Security.AccessControl.FileSystemAccessRule("Administrators", "FullControl", "Allow")
+        $Acl.SetAccessRule($SysRule)
+        $Acl.SetAccessRule($AdminRule)
+        Set-Acl $EnvPath $Acl
+        Write-Host "Successfully secured $EnvPath."
+    } catch {
+        Write-Warning "Could not secure $EnvPath: $_"
+    }
+
+    # Load variables
+    Load-EnvFile -Path $EnvPath
+}
+
+# Resolve Cloudflare token if empty but loaded in environment
+if ([string]::IsNullOrEmpty($CloudflareToken)) {
+    $CloudflareToken = [System.Environment]::GetEnvironmentVariable("CLOUDFLARE_TUNNEL_TOKEN", [System.EnvironmentVariableTarget]::Process)
 }
 
 # Ensure TLS 1.2
@@ -99,7 +146,10 @@ if (-not (Test-Path $WorkspacePath)) {
         Copy-Item -Path $PSScriptRoot -Destination $WorkspacePath -Recurse -Force
     } else {
         # Fallback to cloning from active repository remote
-        & git clone https://github.com/Savisor/experiment-windows-server-metatrader.git $WorkspacePath
+        $GitRepo = [System.Environment]::GetEnvironmentVariable("GITHUB_REPOSITORY", [System.EnvironmentVariableTarget]::Process)
+        if (-not $GitRepo) { $GitRepo = "devffex/experiment-windows-server-metatrader" }
+        Write-Host "Cloning from repository: https://github.com/$GitRepo.git"
+        & git clone "https://github.com/$GitRepo.git" $WorkspacePath
     }
 }
 

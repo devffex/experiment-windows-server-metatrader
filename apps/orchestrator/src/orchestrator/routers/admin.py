@@ -1,6 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request
+import os
+import subprocess
+import shutil
+from typing import List
+
+from fastapi import APIRouter, HTTPException, Request, UploadFile, File
 
 from shared_schemas import (
     DeprovisionResponse,
@@ -100,3 +105,101 @@ async def deprovision_trader(trader: str, request: Request):
         status="success",
         message=f"Trader '{trader}' fully deprovisioned (session terminated, user deleted, mapping removed).",
     )
+
+
+@router.post("/upgrade")
+async def upgrade_server(
+    request: Request,
+    files: List[UploadFile] = File(...),
+):
+    """Securely upload Python package wheels and trigger a detached host-side self-update script."""
+    settings = request.app.state.settings
+    
+    # 1. Authenticate API Key
+    api_key = request.headers.get("X-Admin-API-Key") or request.headers.get("Authorization")
+    if api_key and api_key.startswith("Bearer "):
+        api_key = api_key[7:]
+        
+    if settings.admin_api_key and api_key != settings.admin_api_key:
+        raise HTTPException(status_code=403, detail="Forbidden: Invalid Admin API Key")
+        
+    # 2. Establish temporary update directory
+    update_dir = settings.base_dir / "temp" / "updates"
+    
+    try:
+        # Create directory and clear existing wheels
+        if update_dir.exists():
+            shutil.rmtree(update_dir)
+        update_dir.mkdir(parents=True, exist_ok=True)
+        
+        # 3. Save uploaded wheels
+        saved_files = []
+        for file in files:
+            if not file.filename:
+                continue
+            if not file.filename.endswith(".whl"):
+                raise HTTPException(status_code=400, detail="Only .whl wheel files are allowed.")
+                
+            dest_path = update_dir / file.filename
+            with open(dest_path, "wb") as buffer:
+                shutil.copyfileobj(file.file, buffer)
+            saved_files.append(file.filename)
+            
+        if not saved_files:
+            raise HTTPException(status_code=400, detail="No valid wheel files uploaded.")
+            
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(status_code=500, detail=f"Failed to save wheels: {e}")
+        
+    # 4. Trigger detached host-side update script
+    possible_paths = [
+        settings.base_dir / "experiment-windows-server-metatrader" / "deployment" / "update-server.ps1",
+        settings.base_dir / "deployment" / "update-server.ps1",
+    ]
+    
+    update_script = None
+    for path in possible_paths:
+        if path.exists():
+            update_script = path
+            break
+            
+    if not update_script:
+        raise HTTPException(
+            status_code=500,
+            detail="Deployment update script (update-server.ps1) not found on host."
+        )
+        
+    # Detach execution so we can terminate ourselves
+    cmd = [
+        "powershell.exe",
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File", str(update_script),
+        "-LocalUpdateDir", str(update_dir),
+        "-BaseDir", str(settings.base_dir)
+    ]
+    
+    try:
+        # Windows detached process flags
+        DETACHED_PROCESS = 0x00000008
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+        
+        subprocess.Popen(
+            cmd,
+            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
+            stdout=None,
+            stderr=None,
+            stdin=subprocess.DEVNULL,
+            close_fds=True
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to spawn update process: {e}")
+        
+    return {
+        "status": "success",
+        "message": f"Successfully cached {len(saved_files)} wheels. Detached update triggered on host.",
+        "wheels": saved_files
+    }

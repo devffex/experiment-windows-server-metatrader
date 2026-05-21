@@ -1,5 +1,6 @@
 param (
-    [string]$S3BucketName = "savisor-production-deploy-bucket",
+    [string]$LocalUpdateDir = "",
+    [string]$S3BucketName = "",
     [string]$BaseDir = "C:\savisor"
 )
 
@@ -19,35 +20,57 @@ function Write-Log {
 }
 
 Write-Log "========================================================="
-Write-Log "Starting Automated Rolling Update via AWS SSM Run Command"
-Write-Log "Target Bucket: $S3BucketName | Base Dir: $BaseDir"
+Write-Log "Starting Automated Rolling Update"
+Write-Log "Local Update Dir: $LocalUpdateDir | S3 Bucket: $S3BucketName | Base Dir: $BaseDir"
 Write-Log "========================================================="
 
 # 2. Establish temporary update folder
 $UpdateTempPath = Join-Path $BaseDir "temp\updates"
-if (Test-Path $UpdateTempPath) {
-    Remove-Item -Path "$UpdateTempPath\*" -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
-} else {
+if (-not (Test-Path $UpdateTempPath)) {
     New-Item -ItemType Directory -Path $UpdateTempPath -Force | Out-Null
 }
 
-# 3. Pull upgraded wheels from private S3 deployment bucket
-try {
-    Write-Log "Importing AWS AWSPowerShell tools..."
-    Import-Module AWSPowerShell -ErrorAction SilentlyContinue
-    
-    Write-Log "Downloading new Python wheel distributions from S3 bucket: $S3BucketName"
-    # Copy all wheels from deployment bucket updates folder
-    Get-S3Object -BucketName $S3BucketName -KeyPrefix "updates/" | ForEach-Object {
-        $FileName = $_.Key.Split('/')[-1]
-        if ($FileName -and $FileName.EndsWith(".whl")) {
-            Copy-S3Object -BucketName $S3BucketName -Key $_.Key -LocalFile "$UpdateTempPath\$FileName" -Force
-            Write-Log "Downloaded artifact: $FileName"
-        }
+# 3. Handle package acquisition
+if (-not [string]::IsNullOrEmpty($LocalUpdateDir) -and (Test-Path $LocalUpdateDir)) {
+    Write-Log "Using local update directory: $LocalUpdateDir"
+    # Copy wheels from local update directory to update temp path if different
+    $ResolvedLocal = (Resolve-Path $LocalUpdateDir).Path
+    $ResolvedTemp = (Resolve-Path $UpdateTempPath).Path
+    if ($ResolvedLocal -ne $ResolvedTemp) {
+        Write-Log "Copying local wheels to update temp path..."
+        Copy-Item -Path "$LocalUpdateDir\*.whl" -Destination $UpdateTempPath -Force -ErrorAction SilentlyContinue
     }
-} catch {
-    Write-Log "ERROR: Failed to download updates from S3 bucket: $_"
-    exit 1
+} elseif (-not [string]::IsNullOrEmpty($S3BucketName)) {
+    # Clear temp path for download
+    Remove-Item -Path "$UpdateTempPath\*" -Recurse -Force -ErrorAction SilentlyContinue | Out-Null
+    
+    # Pull upgraded wheels from private S3 deployment bucket
+    try {
+        Write-Log "Importing AWS AWSPowerShell tools..."
+        Import-Module AWSPowerShell -ErrorAction SilentlyContinue
+        
+        Write-Log "Downloading new Python wheel distributions from S3 bucket: $S3BucketName"
+        Get-S3Object -BucketName $S3BucketName -KeyPrefix "updates/" | ForEach-Object {
+            $FileName = $_.Key.Split('/')[-1]
+            if ($FileName -and $FileName.EndsWith(".whl")) {
+                Copy-S3Object -BucketName $S3BucketName -Key $_.Key -LocalFile "$UpdateTempPath\$FileName" -Force
+                Write-Log "Downloaded artifact: $FileName"
+            }
+        }
+    } catch {
+        Write-Log "ERROR: Failed to download updates from S3 bucket: $_"
+        exit 1
+    }
+} else {
+    # No S3 bucket, and no LocalUpdateDir specified.
+    # Check if wheels are already in $UpdateTempPath
+    $ExistingWheels = Get-ChildItem -Path "$UpdateTempPath" -Filter "*.whl" -ErrorAction SilentlyContinue
+    if ($ExistingWheels) {
+        Write-Log "Wheels already present in update folder ($UpdateTempPath). Skipping download step."
+    } else {
+        Write-Log "ERROR: No local update directory, S3 bucket, or pre-staged wheels found."
+        exit 1
+    }
 }
 
 # 4. Stop the Central Orchestrator service (system background service)

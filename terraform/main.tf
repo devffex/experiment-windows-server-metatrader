@@ -113,14 +113,32 @@ resource "aws_instance" "host_instance" {
     # 2. Establish TLS 1.2
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-    # 3. Create temp execution paths
-    $TempPath = "C:\savisor\temp"
+    # 3. Create temp and system execution paths
+    $SavisorDir = "C:\savisor"
+    $TempPath = "$SavisorDir\temp"
     if (-not (Test-Path $TempPath)) {
         New-Item -ItemType Directory -Path $TempPath -Force | Out-Null
     }
 
-    # 4. Fetch the bootstrapping script from the public repository
-    $BootstrapUrl = "https://raw.githubusercontent.com/devffex/experiment-windows-server-metatrader/main/bootstrap-server.ps1"
+    # 4. Generate local .env file using variables injected at build time by Terraform
+    $EnvContent = @(
+        "CLOUDFLARE_TUNNEL_TOKEN=${var.cloudflare_token}",
+        "ORCHESTRATOR_ADMIN_API_KEY=${var.admin_api_key}",
+        "GITHUB_REPOSITORY=${var.github_repository}"
+    )
+    $EnvContent | Out-File -FilePath "$SavisorDir\.env" -Encoding utf8 -Force
+
+    # Secure the environment configuration file immediately
+    $Acl = Get-Acl "$SavisorDir\.env"
+    $Acl.SetAccessRuleProtection($true, $false)
+    $SysRule = New-Object System.Security.AccessControl.FileSystemAccessRule("SYSTEM", "FullControl", "Allow")
+    $AdminRule = New-Object System.Security.AccessControl.FileSystemAccessRule("Administrators", "FullControl", "Allow")
+    $Acl.SetAccessRule($SysRule)
+    $Acl.SetAccessRule($AdminRule)
+    Set-Acl "$SavisorDir\.env" $Acl
+
+    # 5. Fetch the bootstrapping script from the public repository
+    $BootstrapUrl = "https://raw.githubusercontent.com/${var.github_repository}/main/bootstrap-server.ps1"
     $LocalBootstrap = "$TempPath\bootstrap-server.ps1"
 
     try {
@@ -129,26 +147,11 @@ resource "aws_instance" "host_instance" {
         Write-Output "Failed to fetch bootstrap script from GitHub: $_"
     }
 
-    # 5. Retrieve the Cloudflare Tunnel token securely from AWS Parameter Store
-    $CfToken = ""
-    try {
-        # Check if AWS PowerShell modules are loaded (standard on EC2 Windows AMIs)
-        Import-Module AWSPowerShell -ErrorAction SilentlyContinue
-        $CfToken = (Get-SSMParameter -Name "/savisor/${var.environment}/cloudflare_token" -WithDecryption).Value
-    } catch {
-        Write-Output "Failed to retrieve SSM cloudflare_token: $_"
-    }
-
     # 6. Run the bootstrapping script
     if (Test-Path $LocalBootstrap) {
         $LogFile = "$TempPath\userdata-bootstrap.log"
-        if ($CfToken -and $CfToken -ne "PLACEHOLDER_CLOUDFLARE_TUNNEL_TOKEN_REPLACE_ME") {
-            Write-Output "Bootstrapping server with retrieved Cloudflare Token..." >> $LogFile
-            powershell.exe -NoProfile -ExecutionPolicy Bypass -File $LocalBootstrap -CloudflareToken $CfToken >> $LogFile 2>&1
-        } else {
-            Write-Output "Bootstrapping server without Cloudflare Token (placeholder present)..." >> $LogFile
-            powershell.exe -NoProfile -ExecutionPolicy Bypass -File $LocalBootstrap >> $LogFile 2>&1
-        }
+        Write-Output "Bootstrapping server with cloud-agnostic secure environment..." >> $LogFile
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -File $LocalBootstrap -EnvPath "$SavisorDir\.env" >> $LogFile 2>&1
     } else {
         Write-Output "ERROR: bootstrap-server.ps1 could not be downloaded." >> C:\savisor\temp\error.log
     }

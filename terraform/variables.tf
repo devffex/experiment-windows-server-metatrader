@@ -39,3 +39,17 @@ variable "github_repository" {
   description = "The target GitHub repository (format: 'owner/repo') for OIDC federation"
   default     = "devffex/experiment-windows-server-metatrader"
 }
+
+variable "cloudflare_token" {
+  type        = string
+  description = "The Cloudflare Tunnel client token for secure external RDP/API exposure"
+  default     = "PLACEHOLDER_CLOUDFLARE_TUNNEL_TOKEN_REPLACE_ME"
+  sensitive   = true
+}
+
+variable "admin_api_key" {
+  type        = string
+  description = "Secure admin API key for authenticating Orchestrator deployment updates"
+  default     = "PLACEHOLDER_ADMIN_API_KEY_REPLACE_ME"
+  sensitive   = true
+}
