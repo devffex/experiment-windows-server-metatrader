@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 8000
     admin_api_key: str | None = None
+    base_domain: str = "savisor.com"
 
     # Paths
     base_dir: Path = Path("C:/savisor")

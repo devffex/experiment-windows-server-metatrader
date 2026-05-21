@@ -8,7 +8,8 @@ dependencies = [
     "uvicorn>=0.30.0",
     "httpx>=0.27.0",
     "pydantic-settings>=2.0.0",
-    "shared-schemas"
+    "shared-schemas",
+    "python-multipart"
 ]
 
 [tool.uv.sources]
