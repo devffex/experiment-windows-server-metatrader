@@ -49,12 +49,23 @@ async def lifespan(app: FastAPI):
     """Application lifespan: initialize shared state on startup, clean up on shutdown."""
     settings = get_settings()
 
+    # Resolve paths against base_dir if they are relative
+    scripts_dir = settings.scripts_dir if settings.scripts_dir.is_absolute() else settings.base_dir / settings.scripts_dir
+    rdp_dir = settings.rdp_profiles_dir if settings.rdp_profiles_dir.is_absolute() else settings.base_dir / settings.rdp_profiles_dir
+
     # Ensure required directories exist
-    settings.scripts_dir.mkdir(parents=True, exist_ok=True)
-    settings.rdp_profiles_dir.mkdir(parents=True, exist_ok=True)
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    rdp_dir.mkdir(parents=True, exist_ok=True)
 
     # Initialize shared state
-    store = TraderStore(settings.mappings_file)
+    store = TraderStore(settings.database_url)
+    
+    # Auto-initialize database schema (create tables if not exists)
+    try:
+        await store.initialize_db()
+    except Exception as e:
+        print(f"[DATABASE-WARNING] Failed to initialize database tables: {e}", file=sys.stderr)
+
     gw = GatewayProxy(settings)
     provisioner = Provisioner(settings, store)
 
@@ -63,7 +74,7 @@ async def lifespan(app: FastAPI):
     app.state.gateway = gw
     app.state.provisioner = provisioner
 
-    # Start background health monitor
+    # Start background health probe task
     monitor_task = asyncio.create_task(_health_monitor(app))
 
     print(
@@ -73,13 +84,20 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    # Shutdown: cancel monitor and close HTTPX client
+    # Teardown
     monitor_task.cancel()
     try:
         await monitor_task
     except asyncio.CancelledError:
         pass
     await gw.close()
+    
+    # Safely close database connections
+    try:
+        await store.close()
+    except Exception:
+        pass
+
     print("[SHUTDOWN] Orchestrator stopped.", file=sys.stderr)
 
 

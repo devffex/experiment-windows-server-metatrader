@@ -17,17 +17,29 @@ Write-Host "========================================="
 $ScriptDir = $PSScriptRoot
 $WorkspaceRoot = $ScriptDir
 if ($ScriptDir -match "apps[\\/]orchestrator$") {
-    $WorkspaceRoot = Split-Path $ScriptDir -Parent
+    $WorkspaceRoot = Split-Path (Split-Path $ScriptDir -Parent) -Parent
 }
 
 # Resolve active virtual environment Python
 $PythonExe = Join-Path $WorkspaceRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $PythonExe)) {
-    # Fallback to system Python
-    $PythonExe = Get-Command "python" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
-    if (-not $PythonExe) {
-        Write-Error "ERROR: Python executable not found in .venv or system PATH. Please build the project environment first."
-        exit 1
+    # Check parent level venv (e.g. C:\savisor\.venv if WorkspaceRoot is C:\savisor\experiment-windows-server-metatrader)
+    $ParentVenv = Join-Path (Split-Path $WorkspaceRoot -Parent) ".venv\Scripts\python.exe"
+    if (Test-Path $ParentVenv) {
+        $PythonExe = $ParentVenv
+    } else {
+        # Check hardcoded default server venv
+        $ServerVenv = "C:\savisor\.venv\Scripts\python.exe"
+        if (Test-Path $ServerVenv) {
+            $PythonExe = $ServerVenv
+        } else {
+            # Fallback to system Python
+            $PythonExe = Get-Command "python" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+            if (-not $PythonExe) {
+                Write-Error "ERROR: Python executable not found in any virtual environment (.venv) or system PATH. Please build the project environment first."
+                exit 1
+            }
+        }
     }
 }
 Write-Host "Using Python Executable: $PythonExe"

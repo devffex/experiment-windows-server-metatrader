@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import tempfile
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, Optional
+
+from sqlalchemy import String, Integer, select
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 @dataclass
@@ -20,88 +21,116 @@ class TraderMapping:
     trader_name: str
 
 
+class Base(DeclarativeBase):
+    pass
+
+
+class TraderMappingModel(Base):
+    __tablename__ = "trader_mappings"
+
+    username: Mapped[str] = mapped_column(String(100), primary_key=True)
+    port: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    password: Mapped[str] = mapped_column(String(255), nullable=False)
+    rdp_profile: Mapped[str] = mapped_column(String(255), nullable=False)
+    organization: Mapped[str] = mapped_column(String(100), nullable=False)
+    trader_name: Mapped[str] = mapped_column(String(100), nullable=False)
+
+
 class TraderStore:
-    """Thread-safe manager for trader port/credential mappings stored on disk.
+    """PostgreSQL Manager using SQLAlchemy Async Engine to handle persistent user mappings."""
 
-    Uses an asyncio lock to serialize concurrent access and atomic file writes
-    (write to temp file then os.replace) to prevent corruption on crash.
-    """
+    def __init__(self, database_url: str) -> None:
+        self.engine = create_async_engine(database_url, echo=False)
+        self.session_factory = async_sessionmaker(
+            bind=self.engine,
+            class_=AsyncSession,
+            expire_on_commit=False,
+        )
 
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self._lock = asyncio.Lock()
+    async def initialize_db(self) -> None:
+        """Create the database tables if they do not exist."""
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    async def close(self) -> None:
+        """Dispose of the database engine."""
+        await self.engine.dispose()
 
     async def load(self) -> Dict[str, TraderMapping]:
-        """Load all trader mappings from disk."""
-        async with self._lock:
-            return self._load_sync()
-
-    def _load_sync(self) -> Dict[str, TraderMapping]:
-        if not self.path.exists():
-            return {}
-        try:
-            raw = json.loads(self.path.read_text())
+        """Load all trader mappings from PostgreSQL."""
+        async with self.session_factory() as session:
+            result = await session.execute(select(TraderMappingModel))
+            models = result.scalars().all()
             return {
-                k: TraderMapping(**v) for k, v in raw.items()
+                model.username: TraderMapping(
+                    port=model.port,
+                    password=model.password,
+                    rdp_profile=model.rdp_profile,
+                    organization=model.organization,
+                    trader_name=model.trader_name,
+                )
+                for model in models
             }
-        except Exception:
-            return {}
-
-    async def save(self, mappings: Dict[str, TraderMapping]) -> None:
-        """Persist trader mappings to disk with an atomic write."""
-        async with self._lock:
-            self._save_sync(mappings)
-
-    def _save_sync(self, mappings: Dict[str, TraderMapping]) -> None:
-        raw = {k: asdict(v) for k, v in mappings.items()}
-        content = json.dumps(raw, indent=4)
-        dir_path = self.path.parent if self.path.parent != Path(".") else Path.cwd()
-        fd, tmp_path = tempfile.mkstemp(dir=str(dir_path), suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as f:
-                f.write(content)
-            os.replace(tmp_path, str(self.path))
-        except Exception:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-            raise
 
     async def get_trader(self, username: str) -> Optional[TraderMapping]:
         """Get a single trader's mapping, or None if not found."""
-        mappings = await self.load()
-        return mappings.get(username)
-
-    async def add_trader(self, username: str, mapping: TraderMapping) -> None:
-        """Add a trader mapping. Raises ValueError if already exists."""
-        async with self._lock:
-            mappings = self._load_sync()
-            if username in mappings:
-                raise ValueError(f"Trader '{username}' already provisioned.")
-            mappings[username] = mapping
-            self._save_sync(mappings)
+        async with self.session_factory() as session:
+            result = await session.execute(
+                select(TraderMappingModel).where(TraderMappingModel.username == username)
+            )
+            model = result.scalar_one_or_none()
+            if not model:
+                return None
+            return TraderMapping(
+                port=model.port,
+                password=model.password,
+                rdp_profile=model.rdp_profile,
+                organization=model.organization,
+                trader_name=model.trader_name,
+            )
 
     async def upsert_trader(self, username: str, mapping: TraderMapping) -> None:
-        """Add or update a trader mapping."""
-        async with self._lock:
-            mappings = self._load_sync()
-            mappings[username] = mapping
-            self._save_sync(mappings)
+        """Add or update a trader mapping in PostgreSQL."""
+        async with self.session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(TraderMappingModel).where(TraderMappingModel.username == username)
+                )
+                model = result.scalar_one_or_none()
+                if model:
+                    model.port = mapping.port
+                    model.password = mapping.password
+                    model.rdp_profile = mapping.rdp_profile
+                    model.organization = mapping.organization
+                    model.trader_name = mapping.trader_name
+                else:
+                    new_model = TraderMappingModel(
+                        username=username,
+                        port=mapping.port,
+                        password=mapping.password,
+                        rdp_profile=mapping.rdp_profile,
+                        organization=mapping.organization,
+                        trader_name=mapping.trader_name,
+                    )
+                    session.add(new_model)
+                await session.commit()
 
     async def remove_trader(self, username: str) -> bool:
         """Remove a trader mapping. Returns True if the trader existed."""
-        async with self._lock:
-            mappings = self._load_sync()
-            if username not in mappings:
-                return False
-            del mappings[username]
-            self._save_sync(mappings)
-            return True
+        async with self.session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    select(TraderMappingModel).where(TraderMappingModel.username == username)
+                )
+                model = result.scalar_one_or_none()
+                if not model:
+                    return False
+                await session.delete(model)
+                await session.commit()
+                return True
 
     async def get_next_port(self, port_start: int, port_end: int) -> int:
-        """Find the next available port in the configured range.
-
-        Raises RuntimeError if all ports are exhausted.
-        """
+        """Find the next available port in the configured range."""
         mappings = await self.load()
         used_ports = {m.port for m in mappings.values()}
         for port in range(port_start, port_end + 1):

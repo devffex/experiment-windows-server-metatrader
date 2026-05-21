@@ -20,7 +20,9 @@ class Settings(BaseSettings):
     master_terminal_dir: Path = Path("C:/savisor/terminal")
     scripts_dir: Path = Path("scripts")
     rdp_profiles_dir: Path = Path("rdp_profiles")
-    mappings_file: Path = Path("trader_mappings.json")
+
+    # Database
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/savisor"
 
     # Port allocation
     port_range_start: int = 8001
@@ -35,7 +37,10 @@ class Settings(BaseSettings):
     # RDP profile generation
     rdp_server_address: str = "127.0.0.1"
 
-    model_config = {"env_prefix": "ORCHESTRATOR_", "env_file": ".env"}
+    model_config = {
+        "env_prefix": "ORCHESTRATOR_",
+        "env_file": ("C:/savisor/.env", ".env")
+    }
 
 
 @lru_cache
