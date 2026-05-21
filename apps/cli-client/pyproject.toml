@@ -1,15 +1,17 @@
 [project]
-name = "orchestrator"
+name = "cli-client"
 version = "0.1.0"
-description = "Central Orchestrator, Gateway Proxy, & Provisioning Engine"
+description = "Savisor MetaTrader 5 Central Orchestrator & Gateway CLI client"
 requires-python = ">=3.10"
 dependencies = [
-    "fastapi>=0.115.0",
-    "uvicorn>=0.30.0",
+    "typer[all]>=0.9.0",
+    "rich>=13.0.0",
     "httpx>=0.27.0",
-    "pydantic-settings>=2.0.0",
     "shared-schemas"
 ]
+
+[project.scripts]
+savisor-mt = "cli_client.main:app"
 
 [tool.uv.sources]
 shared-schemas = { workspace = true }

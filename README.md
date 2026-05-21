@@ -75,6 +75,8 @@ graph TD
 4. [Phase 2: Custom Shell Override & RemoteApp Integration](#phase-2-custom-shell-override--remoteapp-integration)
 5. [Phase 3: Session-Isolated Loopback API Wrapper](#phase-3-session-isolated-loopback-api-wrapper)
 6. [Phase 4: Management & Verification Workflows](#phase-4-management--verification-workflows)
+7. [Phase 5: Resilient Service Daemons & Session Process Supervisors](#phase-5-resilient-service-daemons--session-process-supervisors)
+8. [Phase 6: Automated Server Provisioning, Folder Lockdown, and Cloudflare Tunnel Secure Exposure](#phase-6-automated-server-provisioning-folder-lockdown-and-cloudflare-tunnel-secure-exposure)
 
 ---
 
@@ -445,123 +447,26 @@ sequenceDiagram
 
 The official MetaTrader 5 Python integration communicates using Windows session handles. If Python runs under a different user profile, it cannot interact with another session's MT5 window.
 
-### Step 1: Session-Isolated API Design (`api_session_template.py`)
-To bypass this limitation, we place a custom Python API template inside `C:\MetaTrader\orchestrator\api_session_template.py`. When a new trader is provisioned, this template is copied directly to their sandbox directory and initialized:
+### Step 1: Session-Isolated API Design (`main.py`)
+To bypass this limitation, we run a session-isolated FastAPI server (`main.py`) under each provisioned Windows user session. This server communicates synchronously with the local MT5 terminal and exposes REST endpoints.
+
+Programmatic login endpoints (like `/login` or `/authenticate`) have been **completely removed** to maximize security. Users must authenticate manually inside the terminal GUI when they connect via Remote Desktop (RDP).
+
+Here is the structured architecture of our loopback API:
 
 ```python
-# C:\MetaTrader\orchestrator\api_session_template.py
+# apps/session-wrapper/src/session_wrapper/main.py
 import argparse
 import sys
 import psutil
 import pandas as pd
 import numpy as np
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import MetaTrader5 as mt5
+from shared_schemas import *
 
-app = FastAPI(title="Session MT5 Loopback API")
+app = FastAPI(title="Session MT5 loopback API")
 
-class LoginRequest(BaseModel):
-    login: int
-    password: str
-    server: str
-
-class OrderRequest(BaseModel):
-    symbol: str
-    volume: float
-    action: str  # BUY / SELL
-    price: float = None
-    sl: float = None
-    tp: float = None
-
-@app.post("/login")
-def login_broker(payload: LoginRequest):
-    # Initialize connection to terminal locally
-    if not mt5.initialize():
-        raise HTTPException(status_code=500, detail=f"MT5 initialization failed: {mt5.last_error()}")
-    
-    # Perform login
-    authorized = mt5.login(
-        login=payload.login,
-        password=payload.password,
-        server=payload.server
-    )
-    if not authorized:
-        raise HTTPException(status_code=401, detail=f"Broker login failed: {mt5.last_error()}")
-    
-    return {"status": "success", "message": f"Successfully logged into account {payload.login}"}
-
-@app.get("/account")
-def get_account_info():
-    info = mt5.account_info()
-    if info is None:
-        raise HTTPException(status_code=500, detail=f"Failed to fetch account info: {mt5.last_error()}")
-    return info._asdict()
-
-@app.post("/order")
-def send_order(payload: OrderRequest):
-    # Map actions
-    action_type = mt5.ORDER_TYPE_BUY if payload.action.upper() == "BUY" else mt5.ORDER_TYPE_SELL
-    
-    # Resolve Price if not provided
-    price = payload.price
-    if not price:
-        tick = mt5.symbol_info_tick(payload.symbol)
-        if not tick:
-            raise HTTPException(status_code=400, detail=f"Failed to fetch symbol ask/bid: {mt5.last_error()}")
-        price = tick.ask if payload.action.upper() == "BUY" else tick.bid
-
-    request = {
-        "action": mt5.TRADE_ACTION_DEAL,
-        "symbol": payload.symbol,
-        "volume": payload.volume,
-        "type": action_type,
-        "price": price,
-        "sl": payload.sl or 0.0,
-        "tp": payload.tp or 0.0,
-        "deviation": 20,
-        "magic": 123456,
-        "comment": "FastAPI Auto-order",
-        "type_time": mt5.ORDER_TIME_GTC,
-        "type_filling": mt5.ORDER_FILLING_FOK,
-    }
-
-    result = mt5.order_send(request)
-    if result.retcode != mt5.TRADE_RETCODE_DONE:
-        raise HTTPException(status_code=400, detail=f"Order rejected: retcode={result.retcode}, comment={result.comment}")
-    
-    return result._asdict()
-
-@app.get("/positions")
-def get_positions(symbol: str = None):
-    # Retrieve active open positions
-    positions = mt5.positions_get(symbol=symbol) if symbol else mt5.positions_get()
-    if positions is None:
-        return {"positions": []}
-    
-    # Process array with Pandas to convert NumPy types safely into JSON
-    df = pd.DataFrame(list(positions), columns=positions[0]._asdict().keys() if len(positions) > 0 else [])
-    df = df.replace({np.nan: None})
-    return {"positions": df.to_dict(orient="records")}
-
-@app.get("/health")
-def get_health():
-    # Gather CPU and memory usage statistics
-    proc = psutil.Process()
-    return {
-        "status": "healthy",
-        "pid": proc.pid,
-        "cpu_percent": proc.cpu_percent(),
-        "memory_info": proc.memory_info()._asdict()
-    }
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8001)
-    args = parser.parse_args()
-    
-    import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=args.port)
+# (Exposes 29 REST endpoints corresponding to the MetaTrader 5 Python API)
 ```
 
 ---
@@ -576,7 +481,7 @@ Start the orchestrator locally inside an elevated command window:
 python C:\MetaTrader\orchestrator\orchestrator.py
 ```
 
-### Step 2: Trigger Provisioning calls
+### Step 2: Trigger Provisioning Calls
 From your administration program (or curl command client), run the provisioner for all three accounts:
 
 ```bash
@@ -596,26 +501,21 @@ curl -X POST http://localhost:8000/api/v1/traders/provision \
   -d '{"organization": "savisor", "trader_name": "john"}'
 ```
 
-### Step 3: Connect to the Isolated RDP Shell
+### Step 3: Connect and Authenticate Manually via RDP
 Download the compiled `savisor-john.rdp` file generated in `C:\MetaTrader\instances\savisor-john\savisor-john.rdp` and launch it:
 1. Provide the credentials (generated password returned in the provision JSON response).
 2. The RDP session opens and launches *only* the MetaTrader 5 GUI inside the screen space.
-3. Observe that there is no Windows Server desktop, Explorer shell, or Start menu accessible.
+3. **Manual Authentication:** Inside the MT5 GUI, navigate to `File -> Login to Trade Account` and manually enter your broker login, password, and server. This removes the risk of passing trade credentials through insecure REST payloads.
 4. Try closing the MT5 application window. Note that the RDP session immediately disconnects and signs off.
 
 ### Step 4: Programmatically Interact Externally
-While John's terminal is active under his RDP session, your external application can trade and query metrics directly via our reverse-proxy gateway on port 8000. Each request is securely directed internally to port 8003:
+While John's terminal is active under his RDP session and manually authenticated, your external application can trade and query metrics directly via our reverse-proxy gateway on port 8000. Each request is securely directed internally to port 8003:
 
 ```bash
 # Get health and CPU metrics for John's session API
 curl http://localhost:8000/api/v1/traders/john/api/health
 
-# Perform login for John's terminal to his broker account
-curl -X POST http://localhost:8000/api/v1/traders/john/api/login \
-  -H "Content-Type: application/json" \
-  -d '{"login": 5012345, "password": "BrokerPassword", "server": "MetaQuotes-Demo"}'
-
-# Send an automated market buy order to John's terminal
+# Send an automated market buy order to John's terminal (price is automatically resolved from current tick ask)
 curl -X POST http://localhost:8000/api/v1/traders/john/api/order \
   -H "Content-Type: application/json" \
   -d '{"symbol": "EURUSD", "volume": 0.1, "action": "BUY"}'
@@ -623,3 +523,389 @@ curl -X POST http://localhost:8000/api/v1/traders/john/api/order \
 # Retrieve active open positions
 curl http://localhost:8000/api/v1/traders/john/api/positions
 ```
+
+---
+
+## Phase 5: Resilient Service Daemons & Session Process Supervisors
+
+To ensure high-availability and self-healing operations, both the **Central Orchestrator** and the **Session-Isolated loopback APIs** are configured to run as resilient, supervised background daemons.
+
+### 1. Central Orchestrator System Service (NSSM)
+
+The Central Orchestrator must run continuously, start automatically on system reboots without user logon, and auto-restart immediately if it crashes. 
+
+We utilize **NSSM (Non-Sucking Service Manager)** to wrap our Python Uvicorn server as a formal Windows Service. 
+
+#### Installation & Configuration
+An administrative PowerShell script `apps/orchestrator/install-orchestrator-service.ps1` automates this entire setup:
+1. **Administrative Check**: Ensures the installer runs under an elevated Administrator shell.
+2. **Dynamic Dependency Gathering**: Downloads NSSM from its official source if not present, and dynamically resolves the active Python virtualenv environment (`.venv`).
+3. **Idempotence**: Unregisters and cleans up any existing service before creating a new one.
+4. **Resilient Registry Parameters**:
+   - **Service Name**: `SavisorOrchestrator`
+   - **Startup Type**: Automatic (boot-time execution).
+   - **Auto-Restart**: Configured to restart within `1000ms` if the process exits unexpectedly.
+   - **Console Rotation Logging**: Binds standard output and error to rotatable files inside `C:\savisor\logs\orchestrator.log`, capped at 10 MB with 5 backups.
+   - **Encoding**: Forces `PYTHONIOENCODING=utf-8` to prevent encoding exceptions in Windows background channels.
+
+To execute the installation, run the following command in an elevated PowerShell terminal:
+```powershell
+powershell -ExecutionPolicy Bypass -File C:\Users\julio\Savisor\experiment-windows-server-metatrader\apps\orchestrator\install-orchestrator-service.ps1
+```
+
+---
+
+### 2. Session-Isolated Interactive Daemon (`session-monitor.ps1`)
+
+Due to **Windows Session 0 Isolation**, services running at boot cannot interact with GUI processes (like the MetaTrader 5 terminal) running in active user sessions. 
+
+To solve this, we deploy a dedicated **interactive PowerShell supervisor** (`session-monitor.ps1`) inside each trader's user context:
+
+```mermaid
+sequenceDiagram
+    participant UserShell as Winlogon Shell
+    participant Monitor as session-monitor.ps1
+    participant MT5 as MetaTrader 5 GUI
+    participant API as Loopback API (pythonw)
+
+    UserShell->>Monitor: Start session-monitor.ps1 (Username, Port)
+    Monitor->>API: Launch background API wrapper (pythonw)
+    Monitor->>MT5: Launch foreground terminal (terminal64.exe)
+    
+    loop Every 3 seconds (Process Heartbeat)
+        Monitor->>MT5: Check if MT5 process exists
+        Note over Monitor,MT5: If MT5 exits -> terminate loop and logoff
+        Monitor->>API: Check if API process exists
+        alt API process has crashed
+            Monitor->>API: Re-launch background API wrapper (Self-Healing)
+        end
+    end
+
+    MT5-->>Monitor: User closes MT5 window
+    Monitor->>API: Force terminate background API (Stop-Process)
+    Monitor->>UserShell: Execute logoff (Tears down RDP session)
+```
+
+#### Key Mechanics:
+- **Centralized Supervision**: A single master template script `apps/orchestrator/src/orchestrator/templates/session-monitor.ps1` houses the supervisor logic. 
+- **Dynamic Provisioning**: During user creation, the provisioner copies this template to `C:\savisor\scripts\session-monitor.ps1` and generates a lightweight startup shell shortcut `start-session-{username}.bat` for each user:
+  ```cmd
+  @echo off
+  powershell.exe -NoProfile -ExecutionPolicy Bypass -File "C:\savisor\scripts\session-monitor.ps1" -Username "{username}" -Port {port}
+  ```
+- **Self-Healing API Heartbeat**: The monitor checks every 3 seconds if the background FastAPI loopback API wrapper is running. If it crashes (e.g. killed via Task Manager or internal exception), the monitor automatically restarts it on the trader's designated port.
+- **Graceful Session Tear Down**: If the MetaTrader 5 terminal GUI is manually closed, the monitor detects this, sweeps any remaining python processes in that session to prevent port-binding leaks, and triggers a clean system `logoff`.
+
+---
+
+## Complete API Reference (29 MT5 REST Endpoints)
+
+Except for manual authentication, the local loopback wrapper exposes all `MetaTrader5` Python package methods via REST endpoints. All trading, market data, and diagnostics routes are fully listed below:
+
+### A. Trading Operations & Calculations
+
+#### 1. `POST /order` (`order_send`)
+- **Description:** Sends a trade transaction request to the broker server (e.g. open/close positions, modify limits, place pending orders).
+- **Request Body:** `OrderRequest` (keys: `symbol`, `volume`, `action` ("BUY" | "SELL"), `price` (optional), `sl` (optional), `tp` (optional)).
+- **Response:** `OrderResponse` (keys: `ticket`, `retcode`, `price`, `volume`, `comment`, `request_id`).
+
+#### 2. `POST /order/check` (`order_check`)
+- **Description:** Checks margin requirements and capital sufficiency for a trade request before execution.
+- **Request Body:** `OrderRequest`.
+- **Response:** `OrderCheckResponse` (keys: `retcode`, `balance`, `equity`, `profit`, `margin`, `margin_free`, `margin_level`, `comment`).
+
+#### 3. `POST /order/calc/profit` (`order_calc_profit`)
+- **Description:** Estimates expected profit for a specified financial instrument, volume, action, and open/close prices.
+- **Query Parameters:** `action` (str), `symbol` (str), `volume` (float), `price_open` (float), `price_close` (float).
+- **Response:** `OrderCalcProfitResponse` (keys: `profit`).
+
+#### 4. `POST /order/calc/margin` (`order_calc_margin`)
+- **Description:** Estimates the required margin in the account currency for a trade request.
+- **Query Parameters:** `action` (str), `symbol` (str), `volume` (float), `price` (float).
+- **Response:** `OrderCalcMarginResponse` (keys: `margin`).
+
+---
+
+### B. Positions & Orders Management
+
+#### 5. `GET /positions` (`positions_get`)
+- **Description:** Retrieves active open positions. Can optionally filter by symbol.
+- **Query Parameters:** `symbol` (optional str).
+- **Response:** `PositionsResponse` (keys: `positions` (list of `PositionInfo`)).
+
+#### 6. `GET /positions/total` (`positions_total`)
+- **Description:** Retrieves the total count of currently open active positions.
+- **Response:** `PositionsTotalResponse` (keys: `total`).
+
+#### 7. `GET /orders` (`orders_get`)
+- **Description:** Retrieves active pending orders (limit/stop). Can optionally filter by symbol.
+- **Query Parameters:** `symbol` (optional str).
+- **Response:** `OrdersGetResponse` (keys: `orders` (list of `OrderInfo`)).
+
+#### 8. `GET /orders/total` (`orders_total`)
+- **Description:** Retrieves the total count of active pending orders.
+- **Response:** `OrdersTotalResponse` (keys: `total`).
+
+---
+
+### C. Account & Terminal Diagnostics
+
+#### 9. `GET /account` (`account_info`)
+- **Description:** Retrieves state properties of the connected trading account (balance, equity, margin, leverage, currency).
+- **Response:** `AccountInfo`.
+
+#### 10. `GET /terminal/info` (`terminal_info`)
+- **Description:** Retrieves state settings and directory paths of the host MetaTrader 5 terminal application.
+- **Response:** `TerminalInfo`.
+
+#### 11. `GET /version` (`version`)
+- **Description:** Obtains the version, build, and release date of the host MT5 terminal.
+- **Response:** `VersionResponse` (keys: `version`, `build`, `release_date`).
+
+#### 12. `GET /last-error` (`last_error`)
+- **Description:** Returns the last error code and description produced by the MT5 Python API.
+- **Response:** `LastErrorResponse` (keys: `code`, `description`).
+
+---
+
+### D. Historical Orders & Deals
+
+#### 13. `POST /history/deals` (`history_deals_get`)
+- **Description:** Retrieves executed deals (transactions) from history filterable by date range, ticket, or position ID.
+- **Request Body:** `HistoryDealsRequest` (keys: `date_from` (optional), `date_to` (optional), `group` (optional), `ticket` (optional), `position` (optional)).
+- **Response:** `HistoryDealsResponse` (keys: `deals` (list of `DealInfo`)).
+
+#### 14. `POST /history/deals/total` (`history_deals_total`)
+- **Description:** Returns the total count of historical deals within a given date range.
+- **Request Body:** `HistoryDealsTotalRequest` (keys: `date_from`, `date_to`).
+- **Response:** `HistoryDealsTotalResponse` (keys: `total`).
+
+#### 15. `POST /history/orders` (`history_orders_get`)
+- **Description:** Retrieves filled or cancelled pending orders from trade history filterable by date range, ticket, or position ID.
+- **Request Body:** `HistoryOrdersRequest` (keys: `date_from` (optional), `date_to` (optional), `group` (optional), `ticket` (optional), `position` (optional)).
+- **Response:** `HistoryOrdersResponse` (keys: `orders` (list of `OrderInfo`)).
+
+#### 16. `POST /history/orders/total` (`history_orders_total`)
+- **Description:** Returns the total count of historical orders within a given date range.
+- **Request Body:** `HistoryOrdersTotalRequest` (keys: `date_from`, `date_to`).
+- **Response:** `HistoryOrdersTotalResponse` (keys: `total`).
+
+---
+
+### E. Market Data & Copying Ticks/Rates
+
+#### 17. `POST /market/ticks/range` (`copy_ticks_range`)
+- **Description:** Copies tick records from a specified date-time range.
+- **Request Body:** `CopyTicksRangeRequest` (keys: `symbol`, `date_from`, `date_to`, `flags`).
+- **Response:** `CopyTicksResponse` (keys: `ticks` (list of `TickResponse`)).
+
+#### 18. `POST /market/ticks/from` (`copy_ticks_from`)
+- **Description:** Copies up to N ticks starting from a specified date-time.
+- **Request Body:** `CopyTicksFromRequest` (keys: `symbol`, `date_from`, `count`, `flags`).
+- **Response:** `CopyTicksResponse` (keys: `ticks`).
+
+#### 19. `POST /market/rates/range` (`copy_rates_range`)
+- **Description:** Copies OHLCV bar rate data within a specified date-time range.
+- **Request Body:** `CopyRatesRangeRequest` (keys: `symbol`, `timeframe`, `date_from`, `date_to`).
+- **Response:** `CopyRatesResponse` (keys: `rates` (list of `RateResponse`)).
+
+#### 20. `POST /market/rates/from` (`copy_rates_from`)
+- **Description:** Copies OHLCV bar rate data starting from a specified date-time.
+- **Request Body:** `CopyRatesFromRequest` (keys: `symbol`, `timeframe`, `date_from`, `count`).
+- **Response:** `CopyRatesResponse` (keys: `rates`).
+
+#### 21. `POST /market/rates/from-pos` (`copy_rates_from_pos`)
+- **Description:** Copies OHLCV bar rate data starting from a specific index offset (0 represents current bar).
+- **Request Body:** `CopyRatesFromPosRequest` (keys: `symbol`, `timeframe`, `start_pos`, `count`).
+- **Response:** `CopyRatesResponse` (keys: `rates`).
+
+---
+
+### F. Market Depth & Order Book (DOM)
+
+#### 22. `POST /market/book/add` (`market_book_add`)
+- **Description:** Subscribes the terminal to Market Depth change events for the specified symbol.
+- **Request Body:** `MarketBookRequest` (keys: `symbol`).
+- **Response:** `MarketBookActionResponse` (keys: `success`).
+
+#### 23. `POST /market/book/release` (`market_book_release`)
+- **Description:** Unsubscribes the terminal from Market Depth change events for the specified symbol.
+- **Request Body:** `MarketBookRequest` (keys: `symbol`).
+- **Response:** `MarketBookActionResponse` (keys: `success`).
+
+#### 24. `POST /market/book/get` (`market_book_get`)
+- **Description:** Returns the current market book (DOM) bid/ask depth entries for the specified symbol.
+- **Request Body:** `MarketBookRequest` (keys: `symbol`).
+- **Response:** `MarketBookGetResponse` (keys: `items` (list of `BookInfo`)).
+
+---
+
+### G. Symbol Information & Market Watch
+
+#### 25. `POST /market/symbol/select` (`symbol_select`)
+- **Description:** Shows or hides a specific symbol inside the Market Watch window.
+- **Request Body:** `SymbolSelectRequest` (keys: `symbol`, `enable` (optional bool)).
+- **Response:** `SymbolSelectResponse` (keys: `success`).
+
+#### 26. `POST /market/symbol/info` (`symbol_info`)
+- **Description:** Retrieves comprehensive metadata specification details for a specific symbol.
+- **Request Body:** `SymbolInfoRequest` (keys: `symbol`).
+- **Response:** `SymbolInfoResponse` (containing trade_mode, digits, trade_contract_size, swaps, spreads, margin factors, etc.).
+
+#### 27. `POST /market/symbol/info/tick` (`symbol_info_tick`)
+- **Description:** Retrieves the latest bid/ask tick data for a specified symbol.
+- **Request Body:** `SymbolInfoTickRequest` (keys: `symbol`).
+- **Response:** `TickResponse` (keys: `time`, `bid`, `ask`, `last`, `volume`, `time_msc`, `flags`, `volume_real`).
+
+#### 28. `GET /market/symbols` (`symbols_get`)
+- **Description:** Retrieves metadata for all symbols available, filterable optionally by a group pattern.
+- **Query Parameters:** `group` (optional str).
+- **Response:** `SymbolsGetResponse` (keys: `symbols` (list of `SymbolInfoResponse`)).
+
+#### 29. `GET /market/symbols/total` (`symbols_total`)
+- **Description:** Returns the total count of symbols available in the terminal database.
+- **Response:** `SymbolsTotalResponse` (keys: `total`).
+
+
+---
+
+## Phase 6: Automated Server Provisioning, Folder Lockdown, and Cloudflare Tunnel Secure Exposure
+
+To establish a production-ready, highly secure, and automated environment on a fresh Windows Server, this phase implements instance bootstrapping, strict user sandbox ACL lockdown, and zero-trust API exposure using **Cloudflare Tunnel (`cloudflared`)**.
+
+### 1. Architectural Workflow with Cloudflare Tunnel
+
+In traditional server environments, APIs are exposed by opening public inbound firewall ports (such as `8000`), which immediately attracts malicious network scans, DDoS vectors, and brute-force intrusion attempts. 
+
+Our architecture completely mitigates this exposure. **No public inbound ports are opened** on the cloud firewall or host OS. Instead, a local Cloudflare Tunnel daemon establishes an outbound-only connection to the Cloudflare Zero Trust Edge:
+
+```mermaid
+graph TD
+    subgraph External_Network [External Internet]
+        AdminApp((Admin App / Client)) -->|1. HTTPS Request<br>api.yourdomain.com| CF_Edge[Cloudflare Edge Node]
+        AlgoApp((Algo Trader Client)) -->|1. HTTPS Order| CF_Edge
+    end
+
+    subgraph CF_ZeroTrust [Cloudflare Edge Network]
+        CF_Edge -->|2. Route securely via established tunnel| CF_Tunnel[Cloudflare Tunnel Infrastructure]
+    end
+
+    subgraph Windows_Server [Windows Server 2022 Session Host]
+        CF_Tunnel <-->|3. Established Outbound Connection<br>No Inbound Port Open| CF_Daemon[cloudflared.exe Daemon<br>Persistent Windows Service]
+        CF_Daemon -->|4. Forward localhost traffic| Orchestrator[Central Orchestrator & Gateway<br>FastAPI / SYSTEM Service - Port 8000]
+        Orchestrator -->|5. Forward RDP-Isolated Route| SessionWrapper[Session API Wrapper<br>FastAPI / User Session - Port 800X]
+    end
+```
+
+#### Security & Operational Advantages:
+*   **Zero Inbound Exposure:** The server's public IP address does not expose port `8000` or `3389` to the open web. Port scanning tools (such as Nmap) see these ports as completely closed.
+*   **Encrypted Traffic:** All traffic between the Cloudflare Edge and the Windows Server is dynamically wrapped in an encrypted TLS tunnel.
+*   **Zero Trust Enforcement:** Administrators can configure Cloudflare Access policies (e.g., verifying client IP address, requiring hardware keys, or checking corporate OAuth credentials) directly at the Cloudflare Edge before traffic ever reaches the local server.
+
+---
+
+### 2. Automated Server Bootstrapping (`bootstrap-server.ps1`)
+
+An administrative PowerShell script `bootstrap-server.ps1` at the root of the workspace automates the entire software provisioning process. When run as Administrator on a clean Windows Server installation, it performs the following:
+
+1.  **Administrative Elevation Check**: Enforces execution within an elevated administrative context.
+2.  **Directory Hierarchy Establishment**: Creates base server layouts:
+    *   `C:\savisor` (Application root)
+    *   `C:\savisor\terminal` (Golden master MetaTrader 5 portable terminal)
+    *   `C:\savisor\scripts` (Supervision and startup scripts)
+    *   `C:\savisor\logs` (Centralized runtime logging files)
+    *   `C:\savisor\temp` (Temporary silent installers)
+3.  **Global Python Setup**: Detects or silently downloads and installs Python 3.10 system-wide (registered in global `PATH`).
+4.  **Global Git Setup**: Detects or installs Git via Windows Package Manager (`winget`) or silent downloader.
+5.  **Python Environment & Dependency Compilation**:
+    *   Creates a system-wide Python virtual environment at `C:\savisor\.venv`.
+    *   Upgrades `pip` and installs the hyper-fast `uv` package manager.
+    *   Clones or syncs the active codebase package modules into `C:\savisor\experiment-windows-server-metatrader`.
+    *   Uses `uv` to compile all packages and sync dependencies (`shared-schemas`, `session-wrapper`, `orchestrator`) in editable (`-e`) mode system-wide.
+6.  **Golden Master Portable MetaTrader 5 Procurement**:
+    *   Silently downloads the official MetaQuotes setup package.
+    *   Installs it quietly inside a temp path, extracts the compiled execution bin and assets to `C:\savisor\terminal\`.
+    *   Forces **Portable Mode** by creating a blank `portable.tst` file in the master directory.
+7.  **Cloudflare Tunnel Client Setup**:
+    *   Downloads the official Windows 64-bit `cloudflared.exe` binary directly to `C:\savisor\cloudflared.exe`.
+    *   If a `-CloudflareToken` parameter is supplied, it installs the tunnel client as a persistent Windows Service, linking it to your Zero Trust dashboard and starting it immediately.
+8.  **Central Orchestrator Registration**:
+    *   Triggers `install-orchestrator-service.ps1` to register the Orchestrator service running continuously in the background under `SYSTEM`.
+
+#### Execution Command:
+To fully bootstrap the server and register the secure tunnel service, open an elevated PowerShell window and run:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\bootstrap-server.ps1 -CloudflareToken "<YOUR_CLOUDFLARE_TUNNEL_TOKEN>"
+```
+
+---
+
+### 3. Multi-Session Folder Lockdown and Strict NTFS ACL Security
+
+To support concurrent multi-session traders without process collisions or data leakage, the provisioning engine enforces absolute sandboxing at the Windows filesystem level.
+
+```
+C:\savisor\
+├── .venv\                     <-- Global Python Venv [Standard Users: Read & Execute Only]
+├── terminal\                  <-- Golden Master MT5 Terminal [Standard Users: Read & Execute Only]
+├── scripts\                   <-- Central Session Supervisors [Standard Users: Read & Execute Only]
+├── logs\                      <-- Central Service Logs [Standard Users: Read Only]
+└── instances\
+    ├── savisor-john\          <-- John's Private Sandbox Folder
+    │   └── terminal\          <-- Copy of MT5 Portable [FULL CONTROL: savisor-john ONLY]
+    └── savisor-julio\         <-- Julio's Private Sandbox Folder
+        └── terminal\          <-- Copy of MT5 Portable [FULL CONTROL: savisor-julio ONLY]
+```
+
+#### Enforcing Sandbox Isolation via programmatic NTFS ACLs:
+During trader provisioning (`provisioner.py`), the script automatically sets strict NTFS permissions using Windows `icacls.exe`:
+
+1.  **Remove Inheritance:**
+    The provisioner executes `/inheritance:d` on `C:\savisor\instances\{username}`. This breaks standard filesystem inheritance to prevent parent folder default permissions from leaking open access.
+2.  **Strip General Access:**
+    Removes generic `Users` and `Everyone` groups access:
+    ```cmd
+    icacls C:\savisor\instances\{username} /remove Users
+    icacls C:\savisor\instances\{username} /remove Everyone
+    ```
+3.  **Grant Exclusive Owner Permissions:**
+    Grants explicit Full Control (`F`) recursively (`(OI)(CI)`) only to the specific trader user and administrative groups:
+    ```cmd
+    icacls C:\savisor\instances\{username} /grant:r {username}:(OI)(CI)F
+    icacls C:\savisor\instances\{username} /grant:r Administrators:(OI)(CI)F
+    ```
+
+#### Security Protections Achieved:
+*   **No Cross-Contamination:** `savisor-john` has zero read or write permissions on `C:\savisor\instances\savisor-julio\`. Any attempt to access, write, or view another trader's folder is completely blocked by the operating system kernel.
+*   **Immutable Core Assets:** All trader accounts are configured as **Standard Local Users**. They have **Read & Execute ONLY** permissions to the central virtualenv `C:\savisor\.venv`, the golden master terminal `C:\savisor\terminal`, and the session monitor scripts. Traders cannot delete or modify core Python code, tamper with the execution environments, or install malicious python libraries.
+
+---
+
+### 4. Management & Verification Workflows
+
+Use the steps below to verify your automated environment configuration, strict directory permissions, and the secure tunnel routing:
+
+#### Step 1: Verify the Bootstrapping Status
+Verify that all system directories and the system-wide `.venv` are generated correctly:
+```powershell
+Test-Path C:\savisor\.venv\Scripts\python.exe
+Test-Path C:\savisor\terminal\terminal64.exe
+Test-Path C:\savisor\cloudflared.exe
+```
+
+#### Step 2: Validate the Cloudflare Tunnel Service
+Check if the `cloudflared` background service has registered and is running successfully:
+```powershell
+Get-Service -Name "cloudflared"
+```
+You can also log into your Cloudflare Zero Trust Dashboard, navigate to **Access -> Tunnels**, and confirm that the tunnel status is marked as **Active/Healthy**.
+
+#### Step 3: Test Sandbox Access Restrictions
+Log into the server RDP session using a trader account (e.g., `savisor-john`):
+1.  **Verify Core Assets Write Lockdown:**
+    Attempt to create a blank file under `C:\savisor\terminal` or `C:\savisor\scripts`. Verify that Windows throws a `Destination Folder Access Denied` (Access Denied / Permission Error).
+2.  **Verify Cross-Folder Read Block:**
+    Attempt to open `C:\savisor\instances\savisor-julio` via the command line or file path. Verify that the OS blocks access with an `Access is denied` warning.
+3.  **Verify Self-Sandbox Full Control:**
+    Write a file or edit config parameters inside `C:\savisor\instances\savisor-john\terminal\config\common.ini`. Verify that this succeeds immediately without administrative prompts.
+

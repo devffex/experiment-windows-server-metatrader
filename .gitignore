@@ -1,1 +1,8 @@
 *.pem
+trader_mappings.json
+rdp_profiles/
+scripts/
+.env
+__pycache__/
+*.pyc
+.venv/
