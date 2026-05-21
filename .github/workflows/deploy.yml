@@ -1,0 +1,99 @@
+name: Savisor CI/CD Production Deployment
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  id-token: write # Required for secure OIDC authentication with AWS
+  contents: read  # Required to check out repository code
+
+jobs:
+  build-and-deploy:
+    name: Build Packages & Trigger Rolling Update
+    runs-on: ubuntu-latest
+
+    steps:
+      # ==============================================================================
+      # 1. Checkout & Build Environment Setup
+      # ==============================================================================
+      - name: Checkout Code Repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python 3.10 Environment
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.10"
+
+      - name: Install Build and Packaging Utilities
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build uv
+
+      # ==============================================================================
+      # 2. Package Python Packages into Wheel Distributions (.whl)
+      # ==============================================================================
+      - name: Compile Wheel Packages
+        run: |
+          mkdir -p dist/
+          # Build shared schemas first
+          python -m build --wheel packages/shared-schemas --outdir dist/
+          # Build session isolated wrapper api next
+          python -m build --wheel apps/session-wrapper --outdir dist/
+          # Build central orchestrator engine last
+          python -m build --wheel apps/orchestrator --outdir dist/
+
+      # ==============================================================================
+      # 3. AWS Security Authentication via OIDC Federation (Passwordless)
+      # ==============================================================================
+      - name: Authenticate with AWS via OIDC Role Assumption
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }} # Format: arn:aws:iam::<ACCOUNT_ID>:role/savisor-production-github-actions-role
+          aws-region: us-east-1
+
+      # ==============================================================================
+      # 4. Upload Deployment Artifacts to Private S3 Bucket
+      # ==============================================================================
+      - name: Publish Upgraded Wheels and Update Scripts to S3
+        run: |
+          # Push Python Wheel distributions
+          aws s3 cp dist/ s3://savisor-production-deploy-bucket/updates/ --recursive --exclude "*" --include "*.whl"
+          # Push host execution update script
+          aws s3 cp deployment/update-server.ps1 s3://savisor-production-deploy-bucket/updates/update-server.ps1
+
+      # ==============================================================================
+      # 5. Resolve Host Instance and Trigger Systems Manager (SSM) Rolling Update
+      # ==============================================================================
+      - name: Execute Rolling Hot-Swap via SSM Run Command
+        run: |
+          # 1. Resolve live production instance ID dynamically using tags
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=Savisor-MT5-Production-Host" "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --output text)
+          
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "ERROR: Active Savisor Production host EC2 Instance not found."
+            exit 1
+          fi
+          
+          echo "Target Instance ID Resolved: $INSTANCE_ID"
+          
+          # 2. Command sequence:
+          #   - Download new update-server.ps1 from S3 to host temp path
+          #   - Run update-server.ps1 to execute the hot-swap
+          SSM_CMD="Import-Module AWSPowerShell; Copy-S3Object -BucketName savisor-production-deploy-bucket -Key updates/update-server.ps1 -LocalFile C:\\savisor\\temp\\update-server.ps1 -Force; powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\\savisor\\temp\\update-server.ps1 -S3BucketName savisor-production-deploy-bucket"
+          
+          # 3. Send Run Command
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunPowerShellScript" \
+            --parameters "commands=[\"$SSM_CMD\"]" \
+            --comment "Automated CI/CD hot-swap package deployment" \
+            --query "Command.CommandId" \
+            --output text)
+          
+          echo "SSM Command Successfully Dispatched: $COMMAND_ID"
+          echo "Deployment is executing on-host in the background..."
