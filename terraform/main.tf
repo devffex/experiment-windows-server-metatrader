@@ -124,6 +124,7 @@ resource "aws_instance" "host_instance" {
     $EnvContent = @(
         "CLOUDFLARE_TUNNEL_TOKEN=${var.cloudflare_token}",
         "ORCHESTRATOR_ADMIN_API_KEY=${var.admin_api_key}",
+        "ORCHESTRATOR_BASE_DOMAIN=${var.base_domain}",
         "GITHUB_REPOSITORY=${var.github_repository}"
     )
     $EnvContent | Out-File -FilePath "$SavisorDir\.env" -Encoding utf8 -Force

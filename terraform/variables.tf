@@ -53,3 +53,9 @@ variable "admin_api_key" {
   default     = "PLACEHOLDER_ADMIN_API_KEY_REPLACE_ME"
   sensitive   = true
 }
+
+variable "base_domain" {
+  type        = string
+  description = "The base domain name (e.g. savisor.com) for wildcard routing and DNS"
+  default     = "savisor.com"
+}
