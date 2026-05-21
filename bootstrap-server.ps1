@@ -154,15 +154,18 @@ if (-not (Test-Path $WorkspacePath)) {
 }
 
 # Synchronize python packages using uv
-Write-Host "Syncing and installing dependencies using uv..."
+Write-Host "Syncing and installing dependencies using uv workspace synchronization..."
 if (Test-Path "$WorkspacePath\pyproject.toml") {
-    & $UvExe pip install -r "$WorkspacePath\pyproject.toml"
-    # Also install editable projects in workspace
-    & $UvExe pip install -e "$WorkspacePath\packages\shared-schemas"
-    & $UvExe pip install -e "$WorkspacePath\apps\session-wrapper"
-    & $UvExe pip install -e "$WorkspacePath\apps\orchestrator"
+    # Run uv sync --all-packages in the workspace directory to install all packages in editable mode
+    Push-Location $WorkspacePath
+    try {
+        & $UvExe sync --all-packages
+    } finally {
+        Pop-Location
+    }
 } else {
-    & $VenvPython -m pip install fastapi uvicorn pydantic psutil pywin32 pandas numpy httpx python-multipart pydantic-settings
+    Write-Host "No pyproject.toml found. Installing core dependencies using uv pip..."
+    & $UvExe pip install fastapi uvicorn pydantic psutil pywin32 pandas numpy httpx python-multipart pydantic-settings
 }
 
 # 7. Pull and Compile Portable MetaTrader 5 Terminal

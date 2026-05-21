@@ -20,15 +20,11 @@ jobs:
       - name: Checkout Code Repository
         uses: actions/checkout@v3
 
-      - name: Setup Python 3.10 Environment
-        uses: actions/setup-python@v4
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v5
         with:
           python-version: "3.10"
-
-      - name: Install Build and Packaging Utilities
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install build uv
+          enable-cache: true
 
       # ==============================================================================
       # 2. Package Python Packages into Wheel Distributions (.whl)
@@ -36,12 +32,10 @@ jobs:
       - name: Compile Wheel Packages
         run: |
           mkdir -p dist/
-          # Build shared schemas first
-          python -m build --wheel packages/shared-schemas --outdir dist/
-          # Build session isolated wrapper api next
-          python -m build --wheel apps/session-wrapper --outdir dist/
-          # Build central orchestrator engine last
-          python -m build --wheel apps/orchestrator --outdir dist/
+          # Build packages using uv build
+          uv build --wheel --package shared-schemas --outdir dist/
+          uv build --wheel --package session-wrapper --outdir dist/
+          uv build --wheel --package orchestrator --outdir dist/
 
       # ==============================================================================
       # 3. Publish Wheels and Trigger Cloud-Agnostic Upgrade API
